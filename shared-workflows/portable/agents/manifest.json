@@ -1,0 +1,7 @@
+{
+  "agents": [],
+  "notes": [
+    "Add agent folders here when the portable agent set is migrated into the repo.",
+    "Keep agent instructions model-agnostic unless a tool-specific adapter is required."
+  ]
+}
