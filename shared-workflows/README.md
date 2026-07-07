@@ -5,6 +5,7 @@ Canonical shared content for tools and agents.
 ## Manifest
 
 - `manifest.json` — canonical inventory of shared skills, agents, templates, and Pi extensions.
+- `references/github-issue-workflow.md` — GitHub Issues parent/child workflow contract.
 
 ## Canonical Portable Skills
 
@@ -32,7 +33,7 @@ Canonical shared content for tools and agents.
 
 ## Pi Extensions
 
-- `crosby/` — Linear execution orchestrator.
+- `crosby/` — GitHub Issues execution orchestrator.
 
 To load Crosby globally in Pi, add this exact folder to `~/.pi/agent/settings.json` under `extensions`:
 

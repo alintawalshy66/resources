@@ -7,7 +7,9 @@ Shared workflow and agent assets for Pi, Claude Code, and Codex in this environm
 - This repo is the work-safe source of truth for portable skills, agents, templates, and the constitution.
 - Pi loads approved shared skills from `shared-workflows/portable/skills`.
 - Pi runtime extensions live under `shared-workflows/pi/extensions/`.
-- Current Pi runtime extension: `crosby`.
+- Current Pi runtime extension: `crosby` for GitHub Issues orchestration.
+- GitHub issue workflow contract: `shared-workflows/references/github-issue-workflow.md`.
+- GitHub label bootstrap script: `scripts/bootstrap-github-labels.sh`.
 - The constitution is stored canonically at `shared-workflows/references/constitution.md`.
 - Portable templates live in `shared-workflows/portable/templates/`.
 
@@ -44,6 +46,22 @@ Point Pi at these folders in `~/.pi/agent/settings.json`:
 ```
 
 After updating settings, restart Pi or run `/reload`.
+
+## GitHub Issues setup
+
+Install and authenticate GitHub CLI if you want Crosby or issue-creation skills to create/read/update issues:
+
+```bash
+gh auth login
+```
+
+Bootstrap the required labels once per repo:
+
+```bash
+./scripts/bootstrap-github-labels.sh OWNER/REPO
+```
+
+The workflow uses parent issues, child issues, labels, and milestones. GitHub Projects are intentionally out of scope for now.
 
 ## Canonical Shared Skills
 

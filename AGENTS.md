@@ -11,11 +11,11 @@ Out of scope: tool-specific duplicates of portable skills, ad-hoc workflow forks
 ## Shared Workflow Source of Truth
 Canonical shared workflow assets live in:
 
-`/home/walsc0/projects/pi-resources/tools/shared-workflows`
+`/home/walsc0/projects/pi-resources/resources/shared-workflows`
 
 Use the manifest as the source of truth for portable workflows:
 
-`/home/walsc0/projects/pi-resources/tools/shared-workflows/manifest.json`
+`/home/walsc0/projects/pi-resources/resources/shared-workflows/manifest.json`
 
 Rules:
 - Do not duplicate portable skill content in this repo.
@@ -27,6 +27,7 @@ Rules:
 
 ## Project Structure
 - `shared-workflows/` — canonical portable skills, templates, and shared references
+- `shared-workflows/references/github-issue-workflow.md` — GitHub Issues parent/child workflow contract
 - `pi/` — Pi-specific runtime extensions and adapters
 - `specs/` — feature/spec worktrees and planning artifacts
 - `README.md` — repo overview and canonical inventory notes
@@ -38,7 +39,7 @@ Rules:
 - **Backend**: None
 - **Frontend**: None
 - **Testing**: N/A unless a specific workflow or extension adds it
-- **Environment**: Windows paths, Git, Bash-compatible shell tools
+- **Environment**: Linux paths, Git, Bash-compatible shell tools, GitHub CLI (`gh`) for issue workflows
 
 ---
 

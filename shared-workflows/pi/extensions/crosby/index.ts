@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,23 +11,6 @@ import {
   runWatchMode,
 } from "./lib-v2.mjs";
 
-function getLinearInvocation(args: string[]) {
-  const configured = process.env.LINEAR_BIN?.trim();
-  if (configured) {
-    return { command: configured, args };
-  }
-
-  const appData = process.env.APPDATA;
-  if (process.platform === "win32" && appData) {
-    const runnerScript = path.join(appData, "npm", "node_modules", "@kyaukyuai", "linear-cli", "run-linear.js");
-    if (existsSync(runnerScript)) {
-      return { command: process.execPath, args: [runnerScript, ...args] };
-    }
-  }
-
-  return { command: "linear", args };
-}
-
 function getGhInvocation(args: string[]) {
   const configured = process.env.GH_BIN?.trim();
   return { command: configured || "gh", args };
@@ -38,146 +21,344 @@ function getGitInvocation(args: string[]) {
   return { command: configured || "git", args };
 }
 
-// Intentionally do not force a Pi worker model here.
-// Let isolated workers inherit normal Pi model resolution from the parent environment/session config.
-const DEFAULT_CROSBY_CLAUDE_MODEL = process.env.CROSBY_CLAUDE_MODEL?.trim() || "claude-sonnet-4-6";
-const DEFAULT_CROSBY_CLAUDE_EFFORT = process.env.CROSBY_CLAUDE_EFFORT?.trim() || "medium";
+const DEFAULT_CROSBY_CLAUDE_MODEL =
+  process.env.CROSBY_CLAUDE_MODEL?.trim() || "claude-sonnet-4-6";
+const DEFAULT_CROSBY_CLAUDE_EFFORT =
+  process.env.CROSBY_CLAUDE_EFFORT?.trim() || "medium";
 
 function getClaudeInvocation(args: string[]) {
   const configured = process.env.CLAUDE_BIN?.trim();
   return { command: configured || "claude", args };
 }
 
-async function loadIssueLabelsFromLinear(pi: ExtensionAPI, issueKey: string) {
-  const invocation = getLinearInvocation([
-    "api",
-    'query($id:String!){ issue(id:$id){ labels { nodes { name } } } }',
-    "--variable",
-    `id=${issueKey}`,
+const GITHUB_STATUS_LABELS = [
+  "status:ready",
+  "status:execute",
+  "status:ready-to-build",
+  "status:building",
+  "status:review",
+];
+
+function normalizeIssueRef(issueRef: string | number | undefined | null) {
+  const raw = String(issueRef ?? "").trim();
+  if (!raw) return raw;
+
+  const urlMatch = raw.match(/\/issues\/(\d+)(?:\b|$)/i);
+  if (urlMatch) return urlMatch[1];
+
+  const hashMatch = raw.match(/^#?(\d+)$/);
+  if (hashMatch) return hashMatch[1];
+
+  return raw;
+}
+
+function formatIssueIdentifier(issue: any) {
+  const number = issue?.number ?? normalizeIssueRef(issue?.identifier);
+  return number ? `#${number}` : String(issue?.identifier ?? "UNKNOWN-ISSUE");
+}
+
+function getIssueLabelNames(issue: any) {
+  const labels = issue?.labels;
+  if (Array.isArray(labels)) {
+    return labels
+      .map((label) => (typeof label === "string" ? label : label?.name))
+      .filter(Boolean);
+  }
+  if (Array.isArray(labels?.nodes)) {
+    return labels.nodes.map((label: any) => label?.name).filter(Boolean);
+  }
+  return [];
+}
+
+function getStatusNameFromGitHubIssue(issue: any) {
+  if (String(issue?.state ?? "").toUpperCase() === "CLOSED") return "Done";
+
+  const labels = getIssueLabelNames(issue).map((label: string) =>
+    label.toLowerCase(),
+  );
+  if (labels.includes("status:execute")) return "Execute";
+  if (labels.includes("status:building")) return "Building";
+  if (labels.includes("status:ready-to-build")) return "Ready to Build";
+  if (labels.includes("status:review")) return "Review";
+  if (labels.includes("status:ready")) return "Ready";
+  return "Unknown";
+}
+
+function getStatusTypeFromStatusName(statusName: string) {
+  const normalized = statusName.toLowerCase();
+  if (normalized === "done") return "completed";
+  if (["building", "execute"].includes(normalized)) return "started";
+  if (normalized === "review") return "review";
+  return "unstarted";
+}
+
+function parseChildIssueRefs(body: string | undefined) {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  for (const match of String(body ?? "").matchAll(/(?:^|[^\w/])#(\d+)\b/gm)) {
+    const ref = match[1];
+    if (!seen.has(ref)) {
+      seen.add(ref);
+      refs.push(ref);
+    }
+  }
+  return refs;
+}
+
+function parseParentIssueRef(body: string | undefined) {
+  const match = String(body ?? "").match(/(?:^|\n)\s*Parent:\s*#?(\d+)\b/i);
+  return match ? `#${match[1]}` : undefined;
+}
+
+function deriveBranchName(issue: any) {
+  const body = String(issue?.body ?? "");
+  const bodyMatch = body.match(/(?:^|\n)\s*Branch:\s*([^\n]+)\s*/i);
+  if (bodyMatch?.[1]?.trim()) return bodyMatch[1].trim();
+
+  const labelNames = getIssueLabelNames(issue);
+  const branchLabel = labelNames.find((label: string) =>
+    /^branch:/i.test(label),
+  );
+  if (branchLabel) return branchLabel.replace(/^branch:/i, "").trim();
+
+  const slug = String(issue?.title ?? "issue")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  const number = normalizeIssueRef(issue?.identifier ?? issue?.number);
+  return `issue-${number}${slug ? `-${slug}` : ""}`;
+}
+
+function toCrosbyIssue(githubIssue: any, children: any[] = []) {
+  const statusName = getStatusNameFromGitHubIssue(githubIssue);
+  const parentIdentifier = parseParentIssueRef(githubIssue?.body);
+  const labels = (Array.isArray(githubIssue?.labels) ? githubIssue.labels : [])
+    .map((label: any) => ({
+      name: typeof label === "string" ? label : label?.name,
+    }))
+    .filter((label: any) => label.name);
+
+  return {
+    ...githubIssue,
+    identifier: formatIssueIdentifier(githubIssue),
+    number: githubIssue?.number,
+    title: githubIssue?.title,
+    description: githubIssue?.body,
+    body: githubIssue?.body,
+    url: githubIssue?.url,
+    branchName: deriveBranchName(githubIssue),
+    state: {
+      name: statusName,
+      type: getStatusTypeFromStatusName(statusName),
+    },
+    labels: { nodes: labels },
+    milestone: githubIssue?.milestone,
+    parent: parentIdentifier ? { identifier: parentIdentifier } : undefined,
+    children,
+    comments: {
+      nodes: Array.isArray(githubIssue?.comments)
+        ? githubIssue.comments
+        : (githubIssue?.comments?.nodes ?? []),
+    },
+  };
+}
+
+async function execGhJson(
+  pi: ExtensionAPI,
+  args: string[],
+  errorContext: string,
+  options?: { cwd?: string },
+) {
+  const invocation = getGhInvocation(args);
+  const result = await pi.exec(
+    invocation.command,
+    invocation.args,
+    options?.cwd ? { cwd: options.cwd } : undefined,
+  );
+
+  if (result.code !== 0) {
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    throw new Error(
+      details
+        ? `${errorContext}. ${details}`
+        : `${errorContext}. GitHub command: ${invocation.command}. Exit code: ${result.code}.`,
+    );
+  }
+
+  try {
+    return JSON.parse(result.stdout || "null");
+  } catch (error) {
+    throw new Error(
+      `${errorContext}. Failed to parse GitHub CLI JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function loadIssueFromGitHub(
+  pi: ExtensionAPI,
+  issueRef: string | number,
+  options: { includeChildren?: boolean } = {},
+) {
+  const normalizedRef = normalizeIssueRef(issueRef);
+  const issue = await execGhJson(
+    pi,
+    [
+      "issue",
+      "view",
+      normalizedRef,
+      "--json",
+      "number,title,body,state,labels,milestone,url,comments",
+    ],
+    `Failed to load GitHub issue ${issueRef}`,
+  );
+
+  let children: any[] = [];
+  if (options.includeChildren !== false) {
+    const childRefs = parseChildIssueRefs(issue?.body).filter(
+      (ref) => ref !== String(issue?.number),
+    );
+    children = await Promise.all(
+      childRefs.map((ref) =>
+        loadIssueFromGitHub(pi, ref, { includeChildren: false }),
+      ),
+    );
+  }
+
+  return toCrosbyIssue(issue, children);
+}
+
+async function loadIssuesByLabelFromGitHub(pi: ExtensionAPI, labels: string[]) {
+  const args = [
+    "issue",
+    "list",
+    "--state",
+    "open",
+    "--limit",
+    "100",
+    "--json",
+    "number,title,body,state,labels,milestone,url",
+  ];
+  for (const label of labels) {
+    args.push("--label", label);
+  }
+
+  const issues = await execGhJson(
+    pi,
+    args,
+    `Failed to load GitHub issues with labels ${labels.join(", ")}`,
+  );
+  return Promise.all(
+    (Array.isArray(issues) ? issues : []).map((issue) =>
+      loadIssueFromGitHub(pi, issue.number),
+    ),
+  );
+}
+
+async function loadExecuteParentQueuesFromGitHub(pi: ExtensionAPI) {
+  const executeParents = await loadIssuesByLabelFromGitHub(pi, [
+    "type:parent",
+    "status:execute",
   ]);
-  const result = await pi.exec(invocation.command, invocation.args);
-
-  if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    throw new Error(
-      details
-        ? `Failed to load labels for ${issueKey} from Linear. ${details}`
-        : `Failed to load labels for ${issueKey} from Linear. Linear command: ${invocation.command}. Exit code: ${result.code}.`,
-    );
-  }
-
-  try {
-    return JSON.parse(result.stdout)?.data?.issue?.labels ?? { nodes: [] };
-  } catch (error) {
-    throw new Error(
-      `Failed to parse Linear label data for ${issueKey}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  return Promise.all(
+    executeParents.map((issue) =>
+      fetchParentQueue(issue.identifier, (key) => loadIssueFromGitHub(pi, key)),
+    ),
+  );
 }
 
-async function loadIssueFromLinear(pi: ExtensionAPI, issueKey: string) {
-  const invocation = getLinearInvocation(["issue", "view", issueKey, "--json"]);
-  const result = await pi.exec(invocation.command, invocation.args);
-
-  if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    throw new Error(
-      details
-        ? `Failed to load ${issueKey} from Linear. ${details}`
-        : `Failed to load ${issueKey} from Linear. Linear command: ${invocation.command}. Exit code: ${result.code}.`,
-    );
-  }
-
-  try {
-    const issue = JSON.parse(result.stdout);
-    const labelTargets = [issue, ...(Array.isArray(issue?.children) ? issue.children : [])].filter(
-      (target) => target?.identifier && !target?.labels,
-    );
-
-    await Promise.all(
-      labelTargets.map(async (target) => {
-        target.labels = await loadIssueLabelsFromLinear(pi, target.identifier);
-      }),
-    );
-
-    return issue;
-  } catch (error) {
-    throw new Error(
-      `Failed to parse Linear queue data for ${issueKey}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
-async function loadIssuesByStateFromLinear(pi: ExtensionAPI, stateName: string) {
-  const invocation = getLinearInvocation([
-    "api",
-    `query($stateName:String!){ issues(filter: { state: { name: { eq: $stateName } } }) { nodes { identifier title priority state { name type } parent { identifier title } labels { nodes { name } } } } }`,
-    "--variable",
-    `stateName=${stateName}`,
-  ]);
-  const result = await pi.exec(invocation.command, invocation.args);
-
-  if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    throw new Error(
-      details
-        ? `Failed to load ${stateName} issues from Linear. ${details}`
-        : `Failed to load ${stateName} issues from Linear. Linear command: ${invocation.command}. Exit code: ${result.code}.`,
-    );
-  }
-
-  try {
-    const payload = JSON.parse(result.stdout);
-    return payload?.data?.issues?.nodes ?? [];
-  } catch (error) {
-    throw new Error(
-      `Failed to parse ${stateName} issue data from Linear: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
-async function loadExecuteParentQueuesFromLinear(pi: ExtensionAPI) {
-  const executeIssues = await loadIssuesByStateFromLinear(pi, "Execute");
-  const executeParents = executeIssues.filter((issue) => issue?.identifier && !issue?.parent);
-  return Promise.all(executeParents.map((issue) => fetchParentQueue(issue.identifier, (key) => loadIssueFromLinear(pi, key))));
-}
-
-function normalizeTargetState(state: string, issueKey?: string) {
-  switch (state) {
-    case "Building":
-      return issueKey && /^COA-\d+$/i.test(issueKey) ? "Build" : "Building";
-    case "Review":
-      return "In Review";
+function labelsForTargetState(state: string) {
+  switch (String(state).toLowerCase().replace(/\s+/g, " ").trim()) {
+    case "building":
+    case "build":
+      return { add: "status:building", close: false };
+    case "review":
+    case "in review":
+      return { add: "status:review", close: false };
+    case "execute":
+      return { add: "status:execute", close: false };
+    case "ready to build":
+      return { add: "status:ready-to-build", close: false };
+    case "ready":
+      return { add: "status:ready", close: false };
+    case "done":
+      return { add: undefined, close: true };
     default:
-      return state;
+      return { add: undefined, close: false };
   }
 }
 
-async function moveIssue(pi: ExtensionAPI, issueKey: string, state: string) {
-  const targetState = normalizeTargetState(state, issueKey);
-  const invocation = getLinearInvocation(["issue", "move", issueKey, targetState]);
-  const result = await pi.exec(invocation.command, invocation.args);
+async function moveIssue(pi: ExtensionAPI, issueRef: string, state: string) {
+  const normalizedRef = normalizeIssueRef(issueRef);
+  const target = labelsForTargetState(state);
 
+  if (target.close) {
+    const invocation = getGhInvocation(["issue", "close", normalizedRef]);
+    const result = await pi.exec(invocation.command, invocation.args);
+    if (result.code !== 0) {
+      const details = [result.stderr, result.stdout]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      throw new Error(
+        details
+          ? `Failed to close GitHub issue ${issueRef}. ${details}`
+          : `Failed to close GitHub issue ${issueRef}.`,
+      );
+    }
+    return;
+  }
+
+  if (!target.add) return;
+
+  const args = ["issue", "edit", normalizedRef, "--add-label", target.add];
+  for (const statusLabel of GITHUB_STATUS_LABELS) {
+    if (statusLabel !== target.add) {
+      args.push("--remove-label", statusLabel);
+    }
+  }
+
+  const invocation = getGhInvocation(args);
+  const result = await pi.exec(invocation.command, invocation.args);
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
-        ? `Failed to move ${issueKey} to ${targetState}. ${details}`
-        : `Failed to move ${issueKey} to ${targetState}. Check Linear CLI authentication and try again.`,
+        ? `Failed to move GitHub issue ${issueRef} to ${state}. ${details}`
+        : `Failed to move GitHub issue ${issueRef} to ${state}.`,
     );
   }
 }
 
-async function addIssueComment(pi: ExtensionAPI, issueKey: string, body: string) {
-  const invocation = getLinearInvocation(["issue", "comment", "add", issueKey, body]);
+async function addIssueComment(
+  pi: ExtensionAPI,
+  issueRef: string,
+  body: string,
+) {
+  const invocation = getGhInvocation([
+    "issue",
+    "comment",
+    normalizeIssueRef(issueRef),
+    "--body",
+    body,
+  ]);
   const result = await pi.exec(invocation.command, invocation.args);
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
-        ? `Failed to add comment to ${issueKey}. ${details}`
-        : `Failed to add comment to ${issueKey}. Check Linear CLI authentication and try again.`,
+        ? `Failed to add GitHub issue comment to ${issueRef}. ${details}`
+        : `Failed to add GitHub issue comment to ${issueRef}.`,
     );
   }
 }
@@ -198,8 +379,14 @@ async function getPullRequestForBranch(
   const result = await pi.exec(invocation.command, invocation.args, { cwd });
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    if (options?.allowMissing && /no pull requests found for branch/i.test(details)) {
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (
+      options?.allowMissing &&
+      /no pull requests found for branch/i.test(details)
+    ) {
       return null;
     }
     throw new Error(
@@ -218,7 +405,13 @@ async function getPullRequestForBranch(
   }
 }
 
-async function createPullRequest(pi: ExtensionAPI, title: string, body: string, branchName: string | undefined, cwd: string) {
+async function createPullRequest(
+  pi: ExtensionAPI,
+  title: string,
+  body: string,
+  branchName: string | undefined,
+  cwd: string,
+) {
   const invocation = getGhInvocation([
     "pr",
     "create",
@@ -231,7 +424,10 @@ async function createPullRequest(pi: ExtensionAPI, title: string, body: string, 
   const result = await pi.exec(invocation.command, invocation.args, { cwd });
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
         ? `Failed to create pull request for branch ${branchName ?? "current"}. ${details}`
@@ -239,20 +435,38 @@ async function createPullRequest(pi: ExtensionAPI, title: string, body: string, 
     );
   }
 
-  const pullRequest = await getPullRequestForBranch(pi, branchName, cwd, { allowMissing: false });
+  const pullRequest = await getPullRequestForBranch(pi, branchName, cwd, {
+    allowMissing: false,
+  });
   if (!pullRequest) {
-    throw new Error(`Pull request creation reported success but no PR was found for branch ${branchName ?? "current"}.`);
+    throw new Error(
+      `Pull request creation reported success but no PR was found for branch ${branchName ?? "current"}.`,
+    );
   }
 
   return pullRequest;
 }
 
-async function updatePullRequestBody(pi: ExtensionAPI, prNumber: number, body: string, cwd: string) {
-  const invocation = getGhInvocation(["pr", "edit", String(prNumber), "--body", body]);
+async function updatePullRequestBody(
+  pi: ExtensionAPI,
+  prNumber: number,
+  body: string,
+  cwd: string,
+) {
+  const invocation = getGhInvocation([
+    "pr",
+    "edit",
+    String(prNumber),
+    "--body",
+    body,
+  ]);
   const result = await pi.exec(invocation.command, invocation.args, { cwd });
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
         ? `Failed to update PR #${prNumber} description. ${details}`
@@ -261,12 +475,26 @@ async function updatePullRequestBody(pi: ExtensionAPI, prNumber: number, body: s
   }
 }
 
-async function addPullRequestComment(pi: ExtensionAPI, prNumber: number, body: string, cwd: string) {
-  const invocation = getGhInvocation(["pr", "comment", String(prNumber), "--body", body]);
+async function addPullRequestComment(
+  pi: ExtensionAPI,
+  prNumber: number,
+  body: string,
+  cwd: string,
+) {
+  const invocation = getGhInvocation([
+    "pr",
+    "comment",
+    String(prNumber),
+    "--body",
+    body,
+  ]);
   const result = await pi.exec(invocation.command, invocation.args, { cwd });
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
         ? `Failed to add PR comment to #${prNumber}. ${details}`
@@ -291,7 +519,10 @@ async function execGit(pi: ExtensionAPI, args: string[], cwd: string) {
   const result = await pi.exec(invocation.command, invocation.args, { cwd });
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
         ? `Git command failed in ${cwd}. ${details}`
@@ -313,13 +544,25 @@ async function getCurrentGitBranch(pi: ExtensionAPI, cwd: string) {
   return result.stdout.trim();
 }
 
-async function hasLocalGitBranch(pi: ExtensionAPI, cwd: string, branchName: string) {
+async function hasLocalGitBranch(
+  pi: ExtensionAPI,
+  cwd: string,
+  branchName: string,
+) {
   const result = await execGit(pi, ["branch", "--list", branchName], cwd);
   return result.stdout.trim().length > 0;
 }
 
-async function hasRemoteGitBranch(pi: ExtensionAPI, cwd: string, branchName: string) {
-  const result = await execGit(pi, ["branch", "-r", "--list", `origin/${branchName}`], cwd);
+async function hasRemoteGitBranch(
+  pi: ExtensionAPI,
+  cwd: string,
+  branchName: string,
+) {
+  const result = await execGit(
+    pi,
+    ["branch", "-r", "--list", `origin/${branchName}`],
+    cwd,
+  );
   return result.stdout.trim().length > 0;
 }
 
@@ -328,7 +571,11 @@ async function hasUncommittedGitChanges(pi: ExtensionAPI, cwd: string) {
   return result.stdout.trim().length > 0;
 }
 
-async function assertCleanWorkingTree(pi: ExtensionAPI, cwd: string, command: "push" | "review") {
+async function assertCleanWorkingTree(
+  pi: ExtensionAPI,
+  cwd: string,
+  command: "push" | "review",
+) {
   if (!(await hasUncommittedGitChanges(pi, cwd))) return;
 
   throw new Error(
@@ -336,16 +583,26 @@ async function assertCleanWorkingTree(pi: ExtensionAPI, cwd: string, command: "p
   );
 }
 
-async function pushGitBranch(pi: ExtensionAPI, cwd: string, branchName?: string) {
+async function pushGitBranch(
+  pi: ExtensionAPI,
+  cwd: string,
+  branchName?: string,
+) {
   const resolvedBranchName = String(branchName ?? "").trim();
   if (!resolvedBranchName) {
-    throw new Error("Cannot push the parent branch because Linear did not provide a branch name. Recovery: set the parent branch name in Linear, then rerun /crosby push.");
+    throw new Error(
+      "Cannot push the parent branch because no branch name could be resolved. Recovery: add a `Branch:` line or `branch:<name>` label to the parent issue, then rerun /crosby push.",
+    );
   }
 
   await execGit(pi, ["push", "-u", "origin", resolvedBranchName], cwd);
 }
 
-async function ensureParentBranch(pi: ExtensionAPI, parentIssue: any, cwd?: string) {
+async function ensureParentBranch(
+  pi: ExtensionAPI,
+  parentIssue: any,
+  cwd?: string,
+) {
   const issueKey = parentIssue?.identifier ?? "UNKNOWN-PARENT";
   const branchName = String(parentIssue?.branchName ?? "").trim();
 
@@ -357,7 +614,7 @@ async function ensureParentBranch(pi: ExtensionAPI, parentIssue: any, cwd?: stri
 
   if (!branchName) {
     throw new Error(
-      `Parent issue ${issueKey} is missing a Linear branch name. Recovery: set the parent branch in Linear, then rerun /crosby ${issueKey}.`,
+      `Parent issue ${issueKey} is missing a branch name. Recovery: add a Branch: line or branch:<name> label to the parent GitHub issue, then rerun /crosby ${issueKey}.`,
     );
   }
 
@@ -379,7 +636,11 @@ async function ensureParentBranch(pi: ExtensionAPI, parentIssue: any, cwd?: stri
   if (await hasLocalGitBranch(pi, cwd, branchName)) {
     await execGit(pi, ["checkout", branchName], cwd);
   } else if (await hasRemoteGitBranch(pi, cwd, branchName)) {
-    await execGit(pi, ["checkout", "-b", branchName, "--track", `origin/${branchName}`], cwd);
+    await execGit(
+      pi,
+      ["checkout", "-b", branchName, "--track", `origin/${branchName}`],
+      cwd,
+    );
   } else {
     await execGit(pi, ["checkout", "-b", branchName], cwd);
   }
@@ -392,7 +653,11 @@ async function ensureParentBranch(pi: ExtensionAPI, parentIssue: any, cwd?: stri
   }
 }
 
-async function runClaudeReviewWorker(pi: ExtensionAPI, prompt: string, cwd: string) {
+async function runClaudeReviewWorker(
+  pi: ExtensionAPI,
+  prompt: string,
+  cwd: string,
+) {
   const schema = JSON.stringify({
     type: "object",
     additionalProperties: false,
@@ -404,7 +669,14 @@ async function runClaudeReviewWorker(pi: ExtensionAPI, prompt: string, cwd: stri
       remainingConcerns: { type: "array", items: { type: "string" } },
       commits: { type: "array", items: { type: "string" } },
     },
-    required: ["outcome", "summary", "changes", "tests", "remainingConcerns", "commits"],
+    required: [
+      "outcome",
+      "summary",
+      "changes",
+      "tests",
+      "remainingConcerns",
+      "commits",
+    ],
   });
   const invocation = getClaudeInvocation([
     "-p",
@@ -423,7 +695,10 @@ async function runClaudeReviewWorker(pi: ExtensionAPI, prompt: string, cwd: stri
   const result = await pi.exec(invocation.command, invocation.args, { cwd });
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
         ? `Claude review worker failed. ${details}`
@@ -473,7 +748,11 @@ function appendWorkerTranscript(pi: ExtensionAPI, event: any) {
   });
 }
 
-async function runIsolatedWorker(pi: ExtensionAPI, prompt: string, cwd?: string) {
+async function runIsolatedWorker(
+  pi: ExtensionAPI,
+  prompt: string,
+  cwd?: string,
+) {
   const invocation = getPiInvocation();
   const result = await pi.exec(
     invocation.command,
@@ -482,7 +761,10 @@ async function runIsolatedWorker(pi: ExtensionAPI, prompt: string, cwd?: string)
   );
 
   if (result.code !== 0) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     throw new Error(
       details
         ? `Isolated worker failed. ${details}`
@@ -495,25 +777,40 @@ async function runIsolatedWorker(pi: ExtensionAPI, prompt: string, cwd?: string)
 
 export default function crosbyExtension(pi: ExtensionAPI) {
   pi.registerCommand("crosby", {
-    description: "Execute parent child-work, watch Execute parents, or explicitly push/review a parent PR",
+    description:
+      "Execute parent child-work, watch Execute parents, or explicitly push/review a parent PR",
     handler: async (args, ctx) => {
       try {
         const command = parseCrosbyCommandArgs(args);
 
         if (command.mode === "watch") {
-          ctx.ui.notify("Crosby watch mode started. Polling parent issues in Execute every 60s.", "success");
+          ctx.ui.notify(
+            "Crosby watch mode started. Polling GitHub parent issues with status:execute every 60s.",
+            "success",
+          );
           await runWatchMode(
             {
-              fetchExecuteParentQueues: () => loadExecuteParentQueuesFromLinear(pi),
-              moveIssue: (targetIssueKey, state) => moveIssue(pi, targetIssueKey, state),
-              addComment: (targetIssueKey, body) => addIssueComment(pi, targetIssueKey, body),
-              runWorker: ({ prompt, cwd }) => runIsolatedWorker(pi, prompt, cwd),
-              ensureParentBranch: ({ parent, cwd }) => ensureParentBranch(pi, parent, cwd),
-              refreshQueue: (parentIssueKey) => fetchParentQueue(parentIssueKey, (key) => loadIssueFromLinear(pi, key)),
-              loadIssue: (issueKey) => loadIssueFromLinear(pi, issueKey),
+              fetchExecuteParentQueues: () =>
+                loadExecuteParentQueuesFromGitHub(pi),
+              moveIssue: (targetIssueKey, state) =>
+                moveIssue(pi, targetIssueKey, state),
+              addComment: (targetIssueKey, body) =>
+                addIssueComment(pi, targetIssueKey, body),
+              runWorker: ({ prompt, cwd }) =>
+                runIsolatedWorker(pi, prompt, cwd),
+              ensureParentBranch: ({ parent, cwd }) =>
+                ensureParentBranch(pi, parent, cwd),
+              refreshQueue: (parentIssueKey) =>
+                fetchParentQueue(parentIssueKey, (key) =>
+                  loadIssueFromGitHub(pi, key),
+                ),
+              loadIssue: (issueKey) => loadIssueFromGitHub(pi, issueKey),
               onExecutionStart: (event) => {
                 const pathText = formatIssuePath(event.path);
-                ctx.ui.notify(`Crosby starting ${event.child?.identifier ?? "issue"}${pathText ? ` (${pathText})` : ""}.`, "success");
+                ctx.ui.notify(
+                  `Crosby starting ${event.child?.identifier ?? "issue"}${pathText ? ` (${pathText})` : ""}.`,
+                  "success",
+                );
                 pi.appendEntry("crosby-worker-started", {
                   parentIssueKey: event.parent?.identifier ?? null,
                   topLevelIssueKey: event.topLevelChild?.identifier ?? null,
@@ -524,7 +821,10 @@ export default function crosbyExtension(pi: ExtensionAPI) {
               },
               onExecutionFinish: (event) => {
                 const pathText = formatIssuePath(event.path);
-                ctx.ui.notify(`Crosby finished ${event.child?.identifier ?? "issue"}: ${event.workerResult?.outcome ?? "unknown"}.`, event.workerResult?.outcome === "fatal" ? "error" : "success");
+                ctx.ui.notify(
+                  `Crosby finished ${event.child?.identifier ?? "issue"}: ${event.workerResult?.outcome ?? "unknown"}.`,
+                  event.workerResult?.outcome === "fatal" ? "error" : "success",
+                );
                 appendWorkerTranscript(pi, event);
               },
             },
@@ -535,15 +835,25 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                   ctx.ui.notify(routingError.message, "error");
                 }
                 if (cycle.status === "processed") {
-                  ctx.ui.notify(`Processed ${cycle.issue.identifier} under ${cycle.parent?.identifier ?? "the active parent"}.`, "success");
+                  ctx.ui.notify(
+                    `Processed ${cycle.issue.identifier} under ${cycle.parent?.identifier ?? "the active parent"}.`,
+                    "success",
+                  );
                   return;
                 }
                 if (cycle.status === "fatal") {
-                  ctx.ui.notify(cycle.errorMessage ?? `Worker failed for ${cycle.issue?.identifier ?? "the active issue"}.`, "error");
+                  ctx.ui.notify(
+                    cycle.errorMessage ??
+                      `Worker failed for ${cycle.issue?.identifier ?? "the active issue"}.`,
+                    "error",
+                  );
                   return;
                 }
                 if (cycle.status === "error") {
-                  ctx.ui.notify(cycle.errorMessage ?? "Crosby watch mode cycle failed.", "error");
+                  ctx.ui.notify(
+                    cycle.errorMessage ?? "Crosby watch mode cycle failed.",
+                    "error",
+                  );
                 }
               },
             },
@@ -552,48 +862,81 @@ export default function crosbyExtension(pi: ExtensionAPI) {
         }
 
         const issueKey = command.issueKey;
-        const queue = await fetchParentQueue(issueKey, (key) => loadIssueFromLinear(pi, key));
+        const queue = await fetchParentQueue(issueKey, (key) =>
+          loadIssueFromGitHub(pi, key),
+        );
 
         if (command.mode === "push") {
           const pullRequest = await publishParentPullRequest(queue, [], {
-            ensureParentBranch: ({ parent, cwd }) => ensureParentBranch(pi, parent, cwd),
-            assertCleanWorkingTree: ({ cwd }) => assertCleanWorkingTree(pi, cwd, "push"),
-            readImplementationSummary: ({ cwd }) => readImplementationSummary(cwd),
-            pushBranch: ({ branchName, cwd }) => pushGitBranch(pi, cwd, branchName),
-            getPullRequest: ({ branchName, cwd, allowMissing }) => getPullRequestForBranch(pi, branchName, cwd, { allowMissing }),
-            createPullRequest: ({ title, body, branchName, cwd }) => createPullRequest(pi, title, body, branchName, cwd),
-            updatePullRequest: ({ prNumber, body, cwd }) => updatePullRequestBody(pi, prNumber, body, cwd),
-            addParentComment: (targetIssueKey, body) => addIssueComment(pi, targetIssueKey, body),
+            ensureParentBranch: ({ parent, cwd }) =>
+              ensureParentBranch(pi, parent, cwd),
+            assertCleanWorkingTree: ({ cwd }) =>
+              assertCleanWorkingTree(pi, cwd, "push"),
+            readImplementationSummary: ({ cwd }) =>
+              readImplementationSummary(cwd),
+            pushBranch: ({ branchName, cwd }) =>
+              pushGitBranch(pi, cwd, branchName),
+            getPullRequest: ({ branchName, cwd, allowMissing }) =>
+              getPullRequestForBranch(pi, branchName, cwd, { allowMissing }),
+            createPullRequest: ({ title, body, branchName, cwd }) =>
+              createPullRequest(pi, title, body, branchName, cwd),
+            updatePullRequest: ({ prNumber, body, cwd }) =>
+              updatePullRequestBody(pi, prNumber, body, cwd),
+            addParentComment: (targetIssueKey, body) =>
+              addIssueComment(pi, targetIssueKey, body),
           });
-          ctx.ui.notify(`Pushed ${queue.parent.identifier} and synced PR ${pullRequest?.url ?? ""}.`, "success");
+          ctx.ui.notify(
+            `Pushed ${queue.parent.identifier} and synced PR ${pullRequest?.url ?? ""}.`,
+            "success",
+          );
           return;
         }
 
         if (command.mode === "review") {
           const review = await reviewParentPullRequest(queue, [], {
-            ensureParentBranch: ({ parent, cwd }) => ensureParentBranch(pi, parent, cwd),
-            assertCleanWorkingTree: ({ cwd }) => assertCleanWorkingTree(pi, cwd, "review"),
-            getPullRequest: ({ branchName, cwd, allowMissing }) => getPullRequestForBranch(pi, branchName, cwd, { allowMissing }),
-            readImplementationSummary: ({ cwd }) => readImplementationSummary(cwd),
-            updatePullRequest: ({ prNumber, body, cwd }) => updatePullRequestBody(pi, prNumber, body, cwd),
-            runClaudeReview: ({ prompt, cwd }) => runClaudeReviewWorker(pi, prompt, cwd),
-            addPullRequestComment: ({ prNumber, body, cwd }) => addPullRequestComment(pi, prNumber, body, cwd),
-            addParentComment: (targetIssueKey, body) => addIssueComment(pi, targetIssueKey, body),
+            ensureParentBranch: ({ parent, cwd }) =>
+              ensureParentBranch(pi, parent, cwd),
+            assertCleanWorkingTree: ({ cwd }) =>
+              assertCleanWorkingTree(pi, cwd, "review"),
+            getPullRequest: ({ branchName, cwd, allowMissing }) =>
+              getPullRequestForBranch(pi, branchName, cwd, { allowMissing }),
+            readImplementationSummary: ({ cwd }) =>
+              readImplementationSummary(cwd),
+            updatePullRequest: ({ prNumber, body, cwd }) =>
+              updatePullRequestBody(pi, prNumber, body, cwd),
+            runClaudeReview: ({ prompt, cwd }) =>
+              runClaudeReviewWorker(pi, prompt, cwd),
+            addPullRequestComment: ({ prNumber, body, cwd }) =>
+              addPullRequestComment(pi, prNumber, body, cwd),
+            addParentComment: (targetIssueKey, body) =>
+              addIssueComment(pi, targetIssueKey, body),
           });
-          ctx.ui.notify(`Reviewed ${queue.parent.identifier}. PR: ${review.pullRequest?.url ?? "unknown"}.`, "success");
+          ctx.ui.notify(
+            `Reviewed ${queue.parent.identifier}. PR: ${review.pullRequest?.url ?? "unknown"}.`,
+            "success",
+          );
           return;
         }
 
         const execution = await runQueueExecution(queue, {
-          moveIssue: (targetIssueKey, state) => moveIssue(pi, targetIssueKey, state),
-          addComment: (targetIssueKey, body) => addIssueComment(pi, targetIssueKey, body),
+          moveIssue: (targetIssueKey, state) =>
+            moveIssue(pi, targetIssueKey, state),
+          addComment: (targetIssueKey, body) =>
+            addIssueComment(pi, targetIssueKey, body),
           runWorker: ({ prompt, cwd }) => runIsolatedWorker(pi, prompt, cwd),
-          ensureParentBranch: ({ parent, cwd }) => ensureParentBranch(pi, parent, cwd),
-          refreshQueue: (parentIssueKey) => fetchParentQueue(parentIssueKey, (key) => loadIssueFromLinear(pi, key)),
-          loadIssue: (issueKey) => loadIssueFromLinear(pi, issueKey),
+          ensureParentBranch: ({ parent, cwd }) =>
+            ensureParentBranch(pi, parent, cwd),
+          refreshQueue: (parentIssueKey) =>
+            fetchParentQueue(parentIssueKey, (key) =>
+              loadIssueFromGitHub(pi, key),
+            ),
+          loadIssue: (issueKey) => loadIssueFromGitHub(pi, issueKey),
           onExecutionStart: (event) => {
             const pathText = formatIssuePath(event.path);
-            ctx.ui.notify(`Crosby starting ${event.child?.identifier ?? "issue"}${pathText ? ` (${pathText})` : ""}.`, "success");
+            ctx.ui.notify(
+              `Crosby starting ${event.child?.identifier ?? "issue"}${pathText ? ` (${pathText})` : ""}.`,
+              "success",
+            );
             pi.appendEntry("crosby-worker-started", {
               parentIssueKey: event.parent?.identifier ?? null,
               topLevelIssueKey: event.topLevelChild?.identifier ?? null,
@@ -604,7 +947,10 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           },
           onExecutionFinish: (event) => {
             const pathText = formatIssuePath(event.path);
-            ctx.ui.notify(`Crosby finished ${event.child?.identifier ?? "issue"}: ${event.workerResult?.outcome ?? "unknown"}.`, event.workerResult?.outcome === "fatal" ? "error" : "success");
+            ctx.ui.notify(
+              `Crosby finished ${event.child?.identifier ?? "issue"}: ${event.workerResult?.outcome ?? "unknown"}.`,
+              event.workerResult?.outcome === "fatal" ? "error" : "success",
+            );
             appendWorkerTranscript(pi, event);
           },
         });
@@ -619,7 +965,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             stateName: child?.state?.name ?? null,
             stateType: child?.state?.type ?? null,
           })),
-          completedChildKeys: execution.completedChildren.map((entry) => entry.child.identifier),
+          completedChildKeys: execution.completedChildren.map(
+            (entry) => entry.child.identifier,
+          ),
           completedChildOutcomes: execution.completedChildren.map((entry) => ({
             issueKey: entry.child.identifier,
             outcome: entry.workerResult.outcome,
@@ -630,19 +978,26 @@ export default function crosbyExtension(pi: ExtensionAPI) {
         });
 
         const lastExecution = execution.completedChildren.at(-1);
-        const parentTransition = execution.movedParentToBuilding ? ` Parent ${queue.parent.identifier} moved to Building.` : "";
+        const parentTransition = execution.movedParentToBuilding
+          ? ` Parent ${queue.parent.identifier} moved to Building.`
+          : "";
         const remaining = Object.keys(execution.remainingByReason).length
           ? ` Remaining: ${JSON.stringify(execution.remainingByReason)}.`
           : "";
-        const message =
-          !lastExecution
-            ? `No runnable child issues remain under ${queue.parent.identifier}.${remaining}`
-            : lastExecution.workerResult.outcome === "fatal"
-              ? `${lastExecution.child.identifier} returned fatal outcome after ${execution.completedChildren.length} child run(s). Recovery: ${lastExecution.workerResult.recoveryNotes.join(" ")}.${parentTransition}`
-              : `Processed ${execution.completedChildren.length} child issue(s) under ${queue.parent.identifier}.${parentTransition}${remaining}`;
-        ctx.ui.notify(message, lastExecution?.workerResult.outcome === "fatal" ? "error" : "success");
+        const message = !lastExecution
+          ? `No runnable child issues remain under ${queue.parent.identifier}.${remaining}`
+          : lastExecution.workerResult.outcome === "fatal"
+            ? `${lastExecution.child.identifier} returned fatal outcome after ${execution.completedChildren.length} child run(s). Recovery: ${lastExecution.workerResult.recoveryNotes.join(" ")}.${parentTransition}`
+            : `Processed ${execution.completedChildren.length} child issue(s) under ${queue.parent.identifier}.${parentTransition}${remaining}`;
+        ctx.ui.notify(
+          message,
+          lastExecution?.workerResult.outcome === "fatal" ? "error" : "success",
+        );
       } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        ctx.ui.notify(
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
       }
     },
   });

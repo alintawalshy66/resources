@@ -33,8 +33,8 @@ In Pi:
 1. **Load Constitution via canonical routing entrypoint**
    - Read `shared-workflows/references/constitution.md`
    - For this hard-gated skill, require exactly one valid work-type selector:
-     - Linear label: `wt:development` or `wt:process-automation`
-     - Non-Linear prompt header: `Work Type: development` or `Work Type: process-automation`
+     - GitHub issue label: `wt:development` or `wt:process-automation`
+     - Non-issue prompt header: `Work Type: development` or `Work Type: process-automation`
    - If the selector is missing, invalid, or duplicated, stop with recovery guidance
    - If the selector conflicts with the issue narrative, warn and proceed by selector
    - Load `## Core` plus the mapped work-type document

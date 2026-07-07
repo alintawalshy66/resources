@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-const DEFAULT_DOCUMENTS_ROOT = "C:\\Users\\camer\\Documents";
+const DEFAULT_DOCUMENTS_ROOT = process.env.HOME ?? "/home/walsc0";
 
 export function parseSingleIssueKeyArg(args) {
   const tokens = String(args ?? "")
@@ -11,11 +11,11 @@ export function parseSingleIssueKeyArg(args) {
 
   if (tokens.length === 1) return tokens[0];
   if (tokens.length === 0) {
-    throw new Error("Usage: /crosby <PARENT-ISSUE-KEY>");
+    throw new Error("Usage: /crosby <PARENT-GITHUB-ISSUE>");
   }
 
   throw new Error(
-    "/crosby accepts exactly one issue key. Recovery: rerun /crosby with a single parent issue key, e.g. /crosby COA-116.",
+    "/crosby accepts exactly one issue reference. Recovery: rerun /crosby with a single parent issue reference, e.g. /crosby #116.",
   );
 }
 
@@ -30,10 +30,15 @@ export function parseCrosbyCommandArgs(args) {
   }
 
   if (tokens.includes("--watch")) {
-    throw new Error("/crosby --watch does not accept an issue key. Recovery: run /crosby --watch by itself.");
+    throw new Error(
+      "/crosby --watch does not accept an issue reference. Recovery: run /crosby --watch by itself.",
+    );
   }
 
-  if (tokens.length === 2 && ["push", "review"].includes(tokens[0].toLowerCase())) {
+  if (
+    tokens.length === 2 &&
+    ["push", "review"].includes(tokens[0].toLowerCase())
+  ) {
     return { mode: tokens[0].toLowerCase(), issueKey: tokens[1] };
   }
 
@@ -42,11 +47,13 @@ export function parseCrosbyCommandArgs(args) {
   }
 
   if (tokens.length === 0) {
-    throw new Error("Usage: /crosby <PARENT-ISSUE-KEY> | /crosby --watch | /crosby push <PARENT-ISSUE-KEY> | /crosby review <PARENT-ISSUE-KEY>");
+    throw new Error(
+      "Usage: /crosby <PARENT-GITHUB-ISSUE> | /crosby --watch | /crosby push <PARENT-GITHUB-ISSUE> | /crosby review <PARENT-GITHUB-ISSUE>",
+    );
   }
 
   throw new Error(
-    "/crosby accepts exactly one parent issue key, the --watch flag, or 'push/review <PARENT-ISSUE-KEY>'. Recovery: rerun /crosby COA-116, /crosby --watch, /crosby push COA-116, or /crosby review COA-116.",
+    "/crosby accepts exactly one parent issue reference, the --watch flag, or 'push/review <PARENT-GITHUB-ISSUE>'. Recovery: rerun /crosby #116, /crosby --watch, /crosby push #116, or /crosby review #116.",
   );
 }
 
@@ -55,13 +62,13 @@ export function loadParentQueueFromIssue(issue) {
 
   if (issue?.parent) {
     throw new Error(
-      `/crosby requires a parent issue with child execution issues. ${issue.identifier} is a child of ${issue.parent.identifier}. Recovery: rerun /crosby with the parent issue key.`,
+      `/crosby requires a parent issue with child GitHub issues. ${issue.identifier} is a child of ${issue.parent.identifier}. Recovery: rerun /crosby with the parent issue reference.`,
     );
   }
 
   if (children.length === 0) {
     throw new Error(
-      `/crosby requires a parent issue with child execution issues. ${issue?.identifier ?? "The supplied issue"} has no child issues. Recovery: add child execution issues first, then rerun /crosby.`,
+      `/crosby requires a parent issue with child GitHub issues. ${issue?.identifier ?? "The supplied issue"} has no child issues. Recovery: add child GitHub issues first, then rerun /crosby.`,
     );
   }
 
@@ -76,18 +83,26 @@ function getStateName(child) {
 }
 
 function getStateType(child) {
-  return String(child?.state?.type ?? "").trim().toLowerCase();
+  return String(child?.state?.type ?? "")
+    .trim()
+    .toLowerCase();
 }
 
 function getPriorityRank(child) {
-  return Number.isFinite(child?.priority) ? child.priority : Number.MAX_SAFE_INTEGER;
+  return Number.isFinite(child?.priority)
+    ? child.priority
+    : Number.MAX_SAFE_INTEGER;
 }
 
 function compareIssueKeys(a, b) {
-  return String(a.identifier ?? "").localeCompare(String(b.identifier ?? ""), undefined, {
-    numeric: true,
-    sensitivity: "base",
-  });
+  return String(a.identifier ?? "").localeCompare(
+    String(b.identifier ?? ""),
+    undefined,
+    {
+      numeric: true,
+      sensitivity: "base",
+    },
+  );
 }
 
 function compareChildren(a, b) {
@@ -99,7 +114,9 @@ function getIssueLabelNames(issue) {
   const labels = issue?.labels;
 
   if (Array.isArray(labels)) {
-    return labels.map((label) => (typeof label === "string" ? label : label?.name)).filter(Boolean);
+    return labels
+      .map((label) => (typeof label === "string" ? label : label?.name))
+      .filter(Boolean);
   }
 
   if (Array.isArray(labels?.nodes)) {
@@ -111,8 +128,12 @@ function getIssueLabelNames(issue) {
 
 export function resolveIssueWorkingDirectory(issue, options = {}) {
   const documentsRoot = options.documentsRoot ?? DEFAULT_DOCUMENTS_ROOT;
-  const projectsRoot = options.projectsRoot ?? path.join(documentsRoot, "projects");
-  const folderExists = typeof options.folderExists === "function" ? options.folderExists : existsSync;
+  const projectsRoot =
+    options.projectsRoot ?? path.join(documentsRoot, "projects");
+  const folderExists =
+    typeof options.folderExists === "function"
+      ? options.folderExists
+      : existsSync;
   const labelNames = getIssueLabelNames(issue);
   const checkedPaths = [];
 
@@ -132,21 +153,27 @@ export function resolveIssueWorkingDirectory(issue, options = {}) {
 
   const issueKey = issue?.identifier ?? "UNKNOWN-ISSUE";
   const labelsSummary = labelNames.length > 0 ? labelNames.join(", ") : "none";
-  const checkedSummary = checkedPaths.length > 0 ? checkedPaths.join(", ") : `${documentsRoot}/*`;
+  const checkedSummary =
+    checkedPaths.length > 0 ? checkedPaths.join(", ") : `${documentsRoot}/*`;
   throw new Error(
     `No folder label on ${issueKey} matched a local project directory. Labels checked: ${labelsSummary}. Paths checked: ${checkedSummary}. Recovery: add a label matching a local folder such as 'coachcw' or 'tools'.`,
   );
 }
 
 function hasUnresolvedBlockers(child) {
-  const blockedBy = Array.isArray(child?.relations?.blockedBy) ? child.relations.blockedBy : [];
+  const blockedBy = Array.isArray(child?.relations?.blockedBy)
+    ? child.relations.blockedBy
+    : [];
   return blockedBy.some((blocker) => blocker?.state?.name !== "Done");
 }
 
 function getNonRunnableReason(child) {
   if (hasUnresolvedBlockers(child)) return "blocked";
 
-  const stateName = getStateName(child).toLowerCase().replace(/\s+/g, " ").trim();
+  const stateName = getStateName(child)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
   const stateType = getStateType(child);
 
   if (stateName === "done") return "done";
@@ -169,17 +196,26 @@ function getBuildingChildren(children) {
     .filter((child) => {
       const stateName = getStateName(child).toLowerCase();
       const stateType = getStateType(child);
-      return ["building", "build", "execute"].includes(stateName) || stateType === "started";
+      return (
+        ["building", "build", "execute"].includes(stateName) ||
+        stateType === "started"
+      );
     })
     .sort(compareIssueKeys);
 }
 
-function buildConcurrentSupervisorError(queue, buildingChildren = getBuildingChildren(queue?.children)) {
+function buildConcurrentSupervisorError(
+  queue,
+  buildingChildren = getBuildingChildren(queue?.children),
+) {
   const buildingIssueKeys = buildingChildren.map((child) => child.identifier);
-  const buildingSuffix = buildingIssueKeys.length > 0 ? ` Active Building child issues: ${buildingIssueKeys.join(", ")}.` : "";
+  const buildingSuffix =
+    buildingIssueKeys.length > 0
+      ? ` Active status:building child issues: ${buildingIssueKeys.join(", ")}.`
+      : "";
 
   return new Error(
-    `Another active supervisor run is already in progress for ${queue?.parent?.identifier ?? "the supplied parent"}.${buildingSuffix} Recovery: wait for the active run to finish or clear the stuck Building child in Linear, then rerun /crosby ${queue?.parent?.identifier ?? "PARENT-ISSUE-KEY"}.`,
+    `Another active supervisor run is already in progress for ${queue?.parent?.identifier ?? "the supplied parent"}.${buildingSuffix} Recovery: wait for the active run to finish or clear the stuck status:building child in GitHub, then rerun /crosby ${queue?.parent?.identifier ?? "PARENT-GITHUB-ISSUE"}.`,
   );
 }
 
@@ -196,7 +232,9 @@ function orderRunnableChildren(runnable) {
   const outgoing = new Map(runnable.map((child) => [child.identifier, []]));
 
   for (const child of runnable) {
-    const blockedChildren = Array.isArray(child?.relations?.blocks) ? child.relations.blocks : [];
+    const blockedChildren = Array.isArray(child?.relations?.blocks)
+      ? child.relations.blocks
+      : [];
     for (const blocked of blockedChildren) {
       if (!childMap.has(blocked?.identifier)) continue;
       outgoing.get(child.identifier).push(blocked.identifier);
@@ -204,7 +242,9 @@ function orderRunnableChildren(runnable) {
     }
   }
 
-  const ready = runnable.filter((child) => indegree.get(child.identifier) === 0).sort(compareChildren);
+  const ready = runnable
+    .filter((child) => indegree.get(child.identifier) === 0)
+    .sort(compareChildren);
   const ordered = [];
 
   while (ready.length > 0) {
@@ -222,7 +262,12 @@ function orderRunnableChildren(runnable) {
 
   if (ordered.length !== runnable.length) {
     const remaining = runnable
-      .filter((child) => !ordered.some((orderedChild) => orderedChild.identifier === child.identifier))
+      .filter(
+        (child) =>
+          !ordered.some(
+            (orderedChild) => orderedChild.identifier === child.identifier,
+          ),
+      )
       .sort(compareChildren);
     ordered.push(...remaining);
   }
@@ -261,7 +306,10 @@ export function classifyChildIssues(children) {
 
 export function selectNextExecuteIssue(issues) {
   const executeIssues = (Array.isArray(issues) ? issues : [])
-    .filter((issue) => getStateName(issue).toLowerCase() === "execute" && issue?.parent)
+    .filter(
+      (issue) =>
+        getStateName(issue).toLowerCase() === "execute" && !issue?.parent,
+    )
     .sort(compareChildren);
 
   return executeIssues[0] ?? null;
@@ -270,22 +318,23 @@ export function selectNextExecuteIssue(issues) {
 export function buildRalphLoopPrompt(child) {
   const issueKey = child?.identifier ?? "UNKNOWN-ISSUE";
   const serializedChild = JSON.stringify(child, null, 2);
-  const mayBeContainer = Array.isArray(child?.children) && child.children.length > 0;
+  const mayBeContainer =
+    Array.isArray(child?.children) && child.children.length > 0;
 
   if (mayBeContainer) {
     return [
       `Continue Crosby execution for container issue ${issueKey}.`,
       "",
       "Execution notes:",
-      `- Linear CLI is available and authenticated in this environment for ${issueKey}.`,
-      `- Do not claim you cannot access Linear unless running 'linear issue view ${issueKey} --json' actually fails in this worker.`,
-      `- First refresh the issue with 'linear issue view ${issueKey} --json'.`,
-      "- Crosby may already have moved this container issue to Build/Building before launching this worker; that state is valid and means this is an explicit resume/continuation, not a fresh ralph-loop start.",
+      `- GitHub CLI (gh) is available and authenticated in this environment for ${issueKey}.`,
+      `- Do not claim you cannot access GitHub Issues unless running 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url' actually fails in this worker.`,
+      `- First refresh the issue with 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url'.`,
+      "- Crosby may already have moved this container issue to status:building before launching this worker; that state is valid and means this is an explicit resume/continuation, not a fresh ralph-loop start.",
       "- This issue has child issues, so treat it as a container/parent queue instead of invoking the ralph-loop hard guard on the container itself.",
-      "- Execute the next unblocked child issue under this container that is in Ready to Build, using the same TDD discipline as ralph-loop for that leaf issue.",
-      "- If a nested child also has children, descend to its next unblocked Ready to Build child until you reach an executable leaf issue.",
-      "- Move the executable leaf issue through Build/Building to Done when complete, or In Review if human action is required.",
-      `- When all direct children of ${issueKey} are Done, return outcome done for ${issueKey}. If runnable children remain, continue within this worker until the ${issueKey} child queue is exhausted or human action is required.`,
+      "- Execute the next unblocked child issue under this container that is in status:ready-to-build, using the same TDD discipline as ralph-loop for that leaf issue.",
+      "- If a nested child also has children, descend to its next unblocked status:ready-to-build child until you reach an executable leaf issue.",
+      "- Move the executable leaf issue through status:building and close it when complete, or move it to status:review if human action is required.",
+      `- When all direct children of ${issueKey} are closed, return outcome done for ${issueKey}. If runnable children remain, continue within this worker until the ${issueKey} child queue is exhausted or human action is required.`,
       "- A preloaded issue snapshot is included below so you have immediate context even before refreshing.",
       "",
       "Preloaded issue snapshot:",
@@ -300,13 +349,13 @@ export function buildRalphLoopPrompt(child) {
     `Continue Crosby execution for issue ${issueKey}.`,
     "",
     "Execution notes:",
-    `- Linear CLI is available and authenticated in this environment for ${issueKey}.`,
-    `- Do not claim you cannot access Linear unless running 'linear issue view ${issueKey} --json' actually fails in this worker.`,
-    `- First refresh the issue with 'linear issue view ${issueKey} --json'.`,
+    `- GitHub CLI (gh) is available and authenticated in this environment for ${issueKey}.`,
+    `- Do not claim you cannot access GitHub Issues unless running 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url' actually fails in this worker.`,
+    `- First refresh the issue with 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url'.`,
     "- The parent queue snapshot may be shallow and omit this issue's children, so do not assume this is a leaf issue from the preloaded snapshot alone.",
-    "- If the refreshed issue has child issues, treat it as a container/parent queue: Build/Building is a valid resume state, find its next unblocked Ready to Build child, and continue through its child queue until exhausted or human action is required.",
+    "- If the refreshed issue has child issues, treat it as a container/parent queue: status:building is a valid resume state, find its next unblocked status:ready-to-build child, and continue through its child queue until exhausted or human action is required.",
     "- Only if the refreshed issue has no children, execute it as a leaf issue using ralph-loop/TDD discipline.",
-    "- If Crosby already moved this issue to Build/Building before launching this worker, treat that as an explicit resume and proceed; do not fail solely because the current state is Build/Building.",
+    "- If Crosby already moved this issue to status:building before launching this worker, treat that as an explicit resume and proceed; do not fail solely because the current state is status:building.",
     "- A preloaded issue snapshot is included below so you have immediate context even before refreshing.",
     "",
     "Preloaded issue snapshot:",
@@ -318,7 +367,9 @@ export function buildRalphLoopPrompt(child) {
 }
 
 function formatBulletList(entries, fallback = "- None.") {
-  return Array.isArray(entries) && entries.length > 0 ? entries.map((entry) => `- ${entry}`).join("\n") : fallback;
+  return Array.isArray(entries) && entries.length > 0
+    ? entries.map((entry) => `- ${entry}`).join("\n")
+    : fallback;
 }
 
 function getOutcomeStateLabel(outcome) {
@@ -330,8 +381,11 @@ function getOutcomeStateLabel(outcome) {
 export function buildParentProgressComment(execution) {
   const followUpNotes =
     execution.workerResult.outcome === "review"
-      ? [execution.workerResult.requiredHumanAction, ...(execution.workerResult.recoveryNotes ?? [])]
-      : execution.workerResult.recoveryNotes ?? [];
+      ? [
+          execution.workerResult.requiredHumanAction,
+          ...(execution.workerResult.recoveryNotes ?? []),
+        ]
+      : (execution.workerResult.recoveryNotes ?? []);
 
   return [
     `${execution.child.identifier} — ${execution.child.title}`,
@@ -379,16 +433,29 @@ function summarizeChildFromExistingProgressComment(child, commentBody) {
   return {
     identifier: child.identifier,
     title: child.title,
-    status: statusLine ? statusLine.replace(/^Status:\s*/i, "").trim() : child?.state?.name ?? "Done",
-    summary: summaryLine ? summaryLine.replace(/^Summary:\s*/i, "").trim() : "See earlier parent progress comment.",
+    status: statusLine
+      ? statusLine.replace(/^Status:\s*/i, "").trim()
+      : (child?.state?.name ?? "Done"),
+    summary: summaryLine
+      ? summaryLine.replace(/^Summary:\s*/i, "").trim()
+      : "See earlier parent progress comment.",
     changes: collectSectionBullets(lines, /^Key changes:/i),
-    tests: collectSectionBullets(lines, /^Tests(?:\/verifications(?: run)?)?:/i),
+    tests: collectSectionBullets(
+      lines,
+      /^Tests(?:\/verifications(?: run)?)?:/i,
+    ),
     followUp: collectSectionBullets(lines, /^Follow-up notes(?: \/ risks)?:/i),
   };
 }
 
-function summarizeChildForFinalComment(child, completedChildren, parentComments) {
-  const currentRunEntry = completedChildren.find((entry) => entry.child.identifier === child.identifier);
+function summarizeChildForFinalComment(
+  child,
+  completedChildren,
+  parentComments,
+) {
+  const currentRunEntry = completedChildren.find(
+    (entry) => entry.child.identifier === child.identifier,
+  );
   if (currentRunEntry) {
     const workerResult = currentRunEntry.workerResult;
     return {
@@ -400,31 +467,53 @@ function summarizeChildForFinalComment(child, completedChildren, parentComments)
       tests: workerResult.tests,
       followUp:
         workerResult.outcome === "review"
-          ? [workerResult.requiredHumanAction, ...(workerResult.recoveryNotes ?? [])]
-          : workerResult.recoveryNotes ?? [],
+          ? [
+              workerResult.requiredHumanAction,
+              ...(workerResult.recoveryNotes ?? []),
+            ]
+          : (workerResult.recoveryNotes ?? []),
     };
   }
 
-  const matchingComment = (Array.isArray(parentComments) ? parentComments : []).find((comment) =>
-    String(comment?.body ?? "").includes(child.identifier),
-  );
+  const matchingComment = (
+    Array.isArray(parentComments) ? parentComments : []
+  ).find((comment) => String(comment?.body ?? "").includes(child.identifier));
 
-  return summarizeChildFromExistingProgressComment(child, matchingComment?.body ?? "");
+  return summarizeChildFromExistingProgressComment(
+    child,
+    matchingComment?.body ?? "",
+  );
 }
 
 function areAllChildrenDone(children) {
-  return Array.isArray(children) && children.length > 0 && children.every((child) => child?.state?.name === "Done");
+  return (
+    Array.isArray(children) &&
+    children.length > 0 &&
+    children.every((child) => child?.state?.name === "Done")
+  );
 }
 
 export function buildFinalParentSummary(queue, completedChildren = []) {
   const parentComments = queue?.parent?.comments?.nodes ?? [];
-  const completedSummaries = (Array.isArray(queue?.children) ? queue.children : [])
+  const completedSummaries = (
+    Array.isArray(queue?.children) ? queue.children : []
+  )
     .filter((child) => child?.state?.name === "Done")
     .sort(compareIssueKeys)
-    .map((child) => summarizeChildForFinalComment(child, completedChildren, parentComments));
+    .map((child) =>
+      summarizeChildForFinalComment(child, completedChildren, parentComments),
+    );
 
-  const verificationLines = [...new Set(completedSummaries.flatMap((summary) => summary.tests).filter(Boolean))];
-  const followUpLines = [...new Set(completedSummaries.flatMap((summary) => summary.followUp).filter(Boolean))];
+  const verificationLines = [
+    ...new Set(
+      completedSummaries.flatMap((summary) => summary.tests).filter(Boolean),
+    ),
+  ];
+  const followUpLines = [
+    ...new Set(
+      completedSummaries.flatMap((summary) => summary.followUp).filter(Boolean),
+    ),
+  ];
 
   return [
     `${queue.parent.identifier} — ${queue.parent.title} final summary`,
@@ -446,7 +535,10 @@ export function buildFinalParentSummary(queue, completedChildren = []) {
   ].join("\n");
 }
 
-export function mergeImplementationSummaryIntoPrBody(existingBody, implementationSummary) {
+export function mergeImplementationSummaryIntoPrBody(
+  existingBody,
+  implementationSummary,
+) {
   const heading = "## Implementation Summary";
   const summary = String(implementationSummary ?? "").trim();
   const body = String(existingBody ?? "").trim();
@@ -465,10 +557,15 @@ export function mergeImplementationSummaryIntoPrBody(existingBody, implementatio
   return `${body}\n\n${section}`.trim();
 }
 
-export function buildClaudeReviewPrompt({ parent, pullRequest, implementationSummary }) {
+export function buildClaudeReviewPrompt({
+  parent,
+  pullRequest,
+  implementationSummary,
+}) {
   const summary = String(implementationSummary ?? "").trim();
   const prUrl = pullRequest?.url ?? "unknown";
-  const branchName = pullRequest?.headRefName ?? parent?.branchName ?? "unknown";
+  const branchName =
+    pullRequest?.headRefName ?? parent?.branchName ?? "unknown";
 
   return [
     `Review parent issue ${parent?.identifier ?? "UNKNOWN"} — ${parent?.title ?? "Unknown parent issue"}.`,
@@ -490,7 +587,11 @@ export function buildClaudeReviewPrompt({ parent, pullRequest, implementationSum
 
 export function buildPullRequestReviewComment(reviewResult) {
   const outcomeLabel =
-    reviewResult?.outcome === "fixed" ? "Fixed issues" : reviewResult?.outcome === "clean" ? "No fixes needed" : "Review failed";
+    reviewResult?.outcome === "fixed"
+      ? "Fixed issues"
+      : reviewResult?.outcome === "clean"
+        ? "No fixes needed"
+        : "Review failed";
 
   return [
     "## Claude review",
@@ -513,7 +614,12 @@ export function buildPullRequestReviewComment(reviewResult) {
   ].join("\n");
 }
 
-export function buildFinalParentSummaryWithReview(queue, completedChildren = [], pullRequest, reviewResult) {
+export function buildFinalParentSummaryWithReview(
+  queue,
+  completedChildren = [],
+  pullRequest,
+  reviewResult,
+) {
   return [
     buildFinalParentSummary(queue, completedChildren),
     "",
@@ -529,18 +635,24 @@ export function buildFinalParentSummaryWithReview(queue, completedChildren = [],
 function parseClaudeReviewWorkerResult(workerResult) {
   const rawOutput = String(workerResult?.stdout ?? "").trim();
   if (!rawOutput) {
-    throw new Error("Claude review result missing. Recovery: rerun the automated review worker and ensure it returns JSON only.");
+    throw new Error(
+      "Claude review result missing. Recovery: rerun the automated review worker and ensure it returns JSON only.",
+    );
   }
 
   let parsed;
   try {
     parsed = JSON.parse(rawOutput);
   } catch {
-    throw new Error("Claude review result was not valid JSON. Recovery: rerun the automated review worker with the structured JSON schema.");
+    throw new Error(
+      "Claude review result was not valid JSON. Recovery: rerun the automated review worker with the structured JSON schema.",
+    );
   }
 
   if (!["clean", "fixed", "error"].includes(parsed?.outcome)) {
-    throw new Error(`Claude review result has invalid outcome '${parsed?.outcome ?? ""}'.`);
+    throw new Error(
+      `Claude review result has invalid outcome '${parsed?.outcome ?? ""}'.`,
+    );
   }
 
   if (typeof parsed?.summary !== "string" || parsed.summary.trim() === "") {
@@ -548,8 +660,15 @@ function parseClaudeReviewWorkerResult(workerResult) {
   }
 
   for (const field of ["changes", "tests", "remainingConcerns", "commits"]) {
-    if (!Array.isArray(parsed?.[field]) || parsed[field].some((entry) => typeof entry !== "string" || entry.trim() === "")) {
-      throw new Error(`Claude review result missing required field '${field}'.`);
+    if (
+      !Array.isArray(parsed?.[field]) ||
+      parsed[field].some(
+        (entry) => typeof entry !== "string" || entry.trim() === "",
+      )
+    ) {
+      throw new Error(
+        `Claude review result missing required field '${field}'.`,
+      );
     }
   }
 
@@ -557,22 +676,31 @@ function parseClaudeReviewWorkerResult(workerResult) {
 }
 
 function getQueueRoutingTarget(queue) {
-  return queue?.parent?.labels ? queue.parent : (queue?.children ?? []).find((child) => child?.labels) ?? queue?.parent;
+  return queue?.parent?.labels
+    ? queue.parent
+    : ((queue?.children ?? []).find((child) => child?.labels) ?? queue?.parent);
 }
 
 function resolveQueueWorkingDirectory(queue, routingOptions) {
-  return resolveIssueWorkingDirectory(getQueueRoutingTarget(queue), routingOptions);
+  return resolveIssueWorkingDirectory(
+    getQueueRoutingTarget(queue),
+    routingOptions,
+  );
 }
 
 function assertChildrenDoneForParentAction(queue, actionLabel) {
   if (areAllChildrenDone(queue?.children)) return;
 
   throw new Error(
-    `Cannot ${actionLabel} for ${queue?.parent?.identifier ?? "the parent issue"} until all child issues are Done. Recovery: finish or explicitly resolve the remaining child issues first, then rerun /crosby ${actionLabel} ${queue?.parent?.identifier ?? "PARENT-ISSUE-KEY"}.`,
+    `Cannot ${actionLabel} for ${queue?.parent?.identifier ?? "the parent issue"} until all child issues are closed. Recovery: finish or explicitly resolve the remaining child issues first, then rerun /crosby ${actionLabel} ${queue?.parent?.identifier ?? "PARENT-GITHUB-ISSUE"}.`,
   );
 }
 
-export async function publishParentPullRequest(queue, completedChildren, operations) {
+export async function publishParentPullRequest(
+  queue,
+  completedChildren,
+  operations,
+) {
   assertChildrenDoneForParentAction(queue, "push");
 
   const routing = resolveQueueWorkingDirectory(queue, operations.routing);
@@ -609,7 +737,10 @@ export async function publishParentPullRequest(queue, completedChildren, operati
     allowMissing: true,
   });
 
-  const nextBody = mergeImplementationSummaryIntoPrBody(pullRequest?.body ?? "", implementationSummary);
+  const nextBody = mergeImplementationSummaryIntoPrBody(
+    pullRequest?.body ?? "",
+    implementationSummary,
+  );
 
   if (pullRequest) {
     await operations.updatePullRequest({
@@ -637,7 +768,11 @@ export async function publishParentPullRequest(queue, completedChildren, operati
   return pullRequest;
 }
 
-export async function reviewParentPullRequest(queue, completedChildren, operations) {
+export async function reviewParentPullRequest(
+  queue,
+  completedChildren,
+  operations,
+) {
   assertChildrenDoneForParentAction(queue, "review");
 
   const routing = resolveQueueWorkingDirectory(queue, operations.routing);
@@ -665,7 +800,7 @@ export async function reviewParentPullRequest(queue, completedChildren, operatio
 
   if (!pullRequest) {
     throw new Error(
-      `No pull request exists yet for branch ${queue?.parent?.branchName ?? "unknown"}. Recovery: run /crosby push ${queue?.parent?.identifier ?? "PARENT-ISSUE-KEY"} first, then rerun /crosby review ${queue?.parent?.identifier ?? "PARENT-ISSUE-KEY"}.`,
+      `No pull request exists yet for branch ${queue?.parent?.branchName ?? "unknown"}. Recovery: run /crosby push ${queue?.parent?.identifier ?? "PARENT-GITHUB-ISSUE"} first, then rerun /crosby review ${queue?.parent?.identifier ?? "PARENT-GITHUB-ISSUE"}.`,
     );
   }
 
@@ -674,7 +809,10 @@ export async function reviewParentPullRequest(queue, completedChildren, operatio
     cwd: routing.cwd,
   });
 
-  const nextBody = mergeImplementationSummaryIntoPrBody(pullRequest?.body ?? "", implementationSummary);
+  const nextBody = mergeImplementationSummaryIntoPrBody(
+    pullRequest?.body ?? "",
+    implementationSummary,
+  );
   await operations.updatePullRequest({
     parent: queue.parent,
     pullRequest,
@@ -705,7 +843,9 @@ export async function reviewParentPullRequest(queue, completedChildren, operatio
       changes: [],
       tests: [],
       commits: [],
-      remainingConcerns: [error instanceof Error ? error.message : String(error)],
+      remainingConcerns: [
+        error instanceof Error ? error.message : String(error),
+      ],
     };
   }
 
@@ -719,14 +859,27 @@ export async function reviewParentPullRequest(queue, completedChildren, operatio
 
   await operations.addParentComment(
     queue.parent.identifier,
-    buildFinalParentSummaryWithReview(queue, completedChildren, pullRequest, reviewResult),
+    buildFinalParentSummaryWithReview(
+      queue,
+      completedChildren,
+      pullRequest,
+      reviewResult,
+    ),
   );
 
   return { pullRequest, reviewResult };
 }
 
-export async function finalizeParentAfterReview(queue, completedChildren, operations) {
-  const pullRequest = await publishParentPullRequest(queue, completedChildren, operations);
+export async function finalizeParentAfterReview(
+  queue,
+  completedChildren,
+  operations,
+) {
+  const pullRequest = await publishParentPullRequest(
+    queue,
+    completedChildren,
+    operations,
+  );
   return reviewParentPullRequest(queue, completedChildren, {
     ...operations,
     getPullRequest: async () => pullRequest,
@@ -735,7 +888,10 @@ export async function finalizeParentAfterReview(queue, completedChildren, operat
 
 async function reportChildOutcomeToParent(queue, execution, addComment) {
   try {
-    await addComment(queue.parent.identifier, buildParentProgressComment(execution));
+    await addComment(
+      queue.parent.identifier,
+      buildParentProgressComment(execution),
+    );
   } catch (error) {
     throw new Error(
       `Failed to post required parent progress comment for ${execution.child.identifier} after finalizing ${getOutcomeStateLabel(execution.workerResult.outcome)}. Recovery: add the parent progress comment on ${queue.parent.identifier}, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
@@ -765,7 +921,7 @@ async function finalizeParentIfComplete(queue, completedChildren, operations) {
     await operations.moveIssue(queue.parent.identifier, "Review");
   } catch (error) {
     throw new Error(
-      `Failed to move parent issue ${queue.parent.identifier} to In Review after all children reached Done. Recovery: move the parent to In Review after confirming the final summary comment, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to move parent issue ${queue.parent.identifier} to Review after all children closed. Recovery: move the parent to Review after confirming the final summary comment, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
@@ -773,7 +929,9 @@ async function finalizeParentIfComplete(queue, completedChildren, operations) {
 function parseStructuredWorkerResult(workerResult, child) {
   const rawOutput = String(workerResult?.stdout ?? "").trim();
   if (!rawOutput) {
-    throw new Error(`Structured worker result missing for ${child.identifier}. Recovery: rerun the child worker and ensure it returns JSON only.`);
+    throw new Error(
+      `Structured worker result missing for ${child.identifier}. Recovery: rerun the child worker and ensure it returns JSON only.`,
+    );
   }
 
   let parsed;
@@ -788,41 +946,72 @@ function parseStructuredWorkerResult(workerResult, child) {
   const requiredString = ["issueKey", "issueTitle", "outcome", "summary"];
   for (const field of requiredString) {
     if (typeof parsed?.[field] !== "string" || parsed[field].trim() === "") {
-      throw new Error(`Structured worker result missing required field '${field}' for ${child.identifier}.`);
+      throw new Error(
+        `Structured worker result missing required field '${field}' for ${child.identifier}.`,
+      );
     }
   }
 
-  if (!Array.isArray(parsed?.changes) || parsed.changes.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
-    throw new Error(`Structured worker result missing required field 'changes' for ${child.identifier}.`);
+  if (
+    !Array.isArray(parsed?.changes) ||
+    parsed.changes.some(
+      (entry) => typeof entry !== "string" || entry.trim() === "",
+    )
+  ) {
+    throw new Error(
+      `Structured worker result missing required field 'changes' for ${child.identifier}.`,
+    );
   }
 
-  if (!Array.isArray(parsed?.tests) || parsed.tests.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
-    throw new Error(`Structured worker result missing required field 'tests' for ${child.identifier}.`);
+  if (
+    !Array.isArray(parsed?.tests) ||
+    parsed.tests.some(
+      (entry) => typeof entry !== "string" || entry.trim() === "",
+    )
+  ) {
+    throw new Error(
+      `Structured worker result missing required field 'tests' for ${child.identifier}.`,
+    );
   }
 
   if (!["done", "review", "fatal"].includes(parsed.outcome)) {
-    throw new Error(`Structured worker result has invalid outcome '${parsed.outcome}' for ${child.identifier}.`);
+    throw new Error(
+      `Structured worker result has invalid outcome '${parsed.outcome}' for ${child.identifier}.`,
+    );
   }
 
   if (parsed.issueKey !== child.identifier) {
-    throw new Error(`Structured worker result issue key mismatch for ${child.identifier}.`);
+    throw new Error(
+      `Structured worker result issue reference mismatch for ${child.identifier}.`,
+    );
   }
 
   if (parsed.issueTitle !== child.title) {
-    throw new Error(`Structured worker result issue title mismatch for ${child.identifier}.`);
+    throw new Error(
+      `Structured worker result issue title mismatch for ${child.identifier}.`,
+    );
   }
 
   if (["review", "fatal"].includes(parsed.outcome)) {
-    if (typeof parsed.requiredHumanAction !== "string" || parsed.requiredHumanAction.trim() === "") {
-      throw new Error(`Structured worker result missing requiredHumanAction for ${child.identifier} ${parsed.outcome} outcome.`);
+    if (
+      typeof parsed.requiredHumanAction !== "string" ||
+      parsed.requiredHumanAction.trim() === ""
+    ) {
+      throw new Error(
+        `Structured worker result missing requiredHumanAction for ${child.identifier} ${parsed.outcome} outcome.`,
+      );
     }
 
     if (
       !Array.isArray(parsed.recoveryNotes) ||
       parsed.recoveryNotes.length === 0 ||
-      parsed.recoveryNotes.some((entry) => typeof entry !== "string" || entry.trim() === "")
+      parsed.recoveryNotes.some(
+        (entry) => typeof entry !== "string" || entry.trim() === "",
+      )
     ) {
-      throw new Error(`Structured worker result missing recoveryNotes for ${child.identifier} ${parsed.outcome} outcome.`);
+      throw new Error(
+        `Structured worker result missing recoveryNotes for ${child.identifier} ${parsed.outcome} outcome.`,
+      );
     }
   }
 
@@ -830,11 +1019,14 @@ function parseStructuredWorkerResult(workerResult, child) {
 }
 
 export function summarizeRemainingChildren(classification) {
-  return Object.entries(classification?.reasonSummary ?? {}).reduce((summary, [reason, issueKeys]) => {
-    if (reason === "done") return summary;
-    summary[reason] = issueKeys;
-    return summary;
-  }, {});
+  return Object.entries(classification?.reasonSummary ?? {}).reduce(
+    (summary, [reason, issueKeys]) => {
+      if (reason === "done") return summary;
+      summary[reason] = issueKeys;
+      return summary;
+    },
+    {},
+  );
 }
 
 export function selectNextRunnableChild(queue) {
@@ -843,7 +1035,9 @@ export function selectNextRunnableChild(queue) {
 
   if (!child) {
     const remainingByReason = summarizeRemainingChildren(classification);
-    const suffix = Object.keys(remainingByReason).length ? ` Remaining children: ${JSON.stringify(remainingByReason)}.` : "";
+    const suffix = Object.keys(remainingByReason).length
+      ? ` Remaining children: ${JSON.stringify(remainingByReason)}.`
+      : "";
     throw new Error(
       `/crosby found no runnable child issues under ${queue?.parent?.identifier ?? "the supplied parent"}.${suffix}`,
     );
@@ -859,26 +1053,41 @@ async function resolveExecutableIssuePath(queue, operations, ancestors = []) {
   const classification = classifyChildIssues(queue?.children ?? []);
 
   for (const candidate of classification.runnable) {
-    const fullIssue = typeof operations.loadIssue === "function" ? await operations.loadIssue(candidate.identifier) : candidate;
+    const fullIssue =
+      typeof operations.loadIssue === "function"
+        ? await operations.loadIssue(candidate.identifier)
+        : candidate;
     const executable = fullIssue ?? candidate;
     const path = [...ancestors, executable];
-    const children = Array.isArray(executable?.children) ? executable.children : [];
+    const children = Array.isArray(executable?.children)
+      ? executable.children
+      : [];
 
     if (children.length === 0) {
       return { child: executable, classification, path };
     }
 
     try {
-      return await resolveExecutableIssuePath({ parent: executable, children }, operations, path);
+      return await resolveExecutableIssuePath(
+        { parent: executable, children },
+        operations,
+        path,
+      );
     } catch (error) {
-      if (!String(error instanceof Error ? error.message : error).includes("found no runnable executable leaf")) {
+      if (
+        !String(error instanceof Error ? error.message : error).includes(
+          "found no runnable executable leaf",
+        )
+      ) {
         throw error;
       }
     }
   }
 
   const remainingByReason = summarizeRemainingChildren(classification);
-  const suffix = Object.keys(remainingByReason).length ? ` Remaining children: ${JSON.stringify(remainingByReason)}.` : "";
+  const suffix = Object.keys(remainingByReason).length
+    ? ` Remaining children: ${JSON.stringify(remainingByReason)}.`
+    : "";
   throw new Error(
     `/crosby found no runnable executable leaf under ${queue?.parent?.identifier ?? "the supplied parent"}.${suffix}`,
   );
@@ -886,7 +1095,10 @@ async function resolveExecutableIssuePath(queue, operations, ancestors = []) {
 
 async function finalizeCompletedContainers(path, operations) {
   for (let index = path.length - 2; index >= 0; index -= 1) {
-    const container = typeof operations.loadIssue === "function" ? await operations.loadIssue(path[index].identifier) : path[index];
+    const container =
+      typeof operations.loadIssue === "function"
+        ? await operations.loadIssue(path[index].identifier)
+        : path[index];
     if (areAllChildrenDone(container?.children)) {
       await operations.moveIssue(container.identifier, "Done");
     }
@@ -900,10 +1112,15 @@ function getExecutionRoutingTarget(queue, child) {
 }
 
 export async function runSingleChildExecution(queue, operations) {
-  const { child, classification, path } = await resolveExecutableIssuePath(queue, operations);
+  const { child, classification, path } = await resolveExecutableIssuePath(
+    queue,
+    operations,
+  );
   const topLevelChild = path[0] ?? child;
   const routingTarget = getExecutionRoutingTarget(queue, topLevelChild);
-  const routing = routingTarget ? resolveIssueWorkingDirectory(routingTarget, operations.routing) : null;
+  const routing = routingTarget
+    ? resolveIssueWorkingDirectory(routingTarget, operations.routing)
+    : null;
 
   if (typeof operations.ensureParentBranch === "function") {
     await operations.ensureParentBranch({
@@ -918,15 +1135,19 @@ export async function runSingleChildExecution(queue, operations) {
       await operations.moveIssue(issue.identifier, "Building");
     } catch (error) {
       if (typeof operations.refreshQueue === "function") {
-        const refreshedQueue = await operations.refreshQueue(queue.parent.identifier);
-        const refreshedChild = (refreshedQueue?.children ?? []).find((entry) => entry?.identifier === issue.identifier);
+        const refreshedQueue = await operations.refreshQueue(
+          queue.parent.identifier,
+        );
+        const refreshedChild = (refreshedQueue?.children ?? []).find(
+          (entry) => entry?.identifier === issue.identifier,
+        );
         if (refreshedChild?.state?.name === "Building") {
           throw buildConcurrentSupervisorError(refreshedQueue);
         }
       }
 
       throw new Error(
-        `Failed to move issue ${issue.identifier} to Building. Recovery: inspect the issue state in Linear, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to move issue ${issue.identifier} to status:building. Recovery: inspect the issue state in GitHub, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -941,13 +1162,15 @@ export async function runSingleChildExecution(queue, operations) {
     });
   }
 
-  const movedParentToBuilding = !["Building", "Build", "Execute"].includes(queue?.parent?.state?.name);
+  const movedParentToBuilding = !["Building", "Build", "Execute"].includes(
+    queue?.parent?.state?.name,
+  );
   if (movedParentToBuilding) {
     try {
       await operations.moveIssue(queue.parent.identifier, "Building");
     } catch (error) {
       throw new Error(
-        `Failed to move parent issue ${queue.parent.identifier} to Building after claiming ${child.identifier}. Recovery: fix the parent workflow state in Linear before worker launch, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to move parent issue ${queue.parent.identifier} to status:building after claiming ${child.identifier}. Recovery: fix the parent status label in GitHub before worker launch, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -979,7 +1202,7 @@ export async function runSingleChildExecution(queue, operations) {
   }
 
   if (workerResult.outcome === "review") {
-    await operations.moveIssue(child.identifier, "In Review");
+    await operations.moveIssue(child.identifier, "Review");
   }
 
   return {
@@ -1060,9 +1283,15 @@ function getErrorMessage(error) {
 }
 
 export async function runWatchCycle(operations) {
-  const fetchedExecuteParentQueues = await operations.fetchExecuteParentQueues();
-  const executeParentQueues = (Array.isArray(fetchedExecuteParentQueues) ? fetchedExecuteParentQueues : [])
-    .filter((queue) => queue?.parent && getStateName(queue.parent).toLowerCase() === "execute")
+  const fetchedExecuteParentQueues =
+    await operations.fetchExecuteParentQueues();
+  const executeParentQueues = (
+    Array.isArray(fetchedExecuteParentQueues) ? fetchedExecuteParentQueues : []
+  )
+    .filter(
+      (queue) =>
+        queue?.parent && getStateName(queue.parent).toLowerCase() === "execute",
+    )
     .sort((a, b) => compareChildren(a.parent, b.parent));
   const routingErrors = [];
 
@@ -1115,7 +1344,9 @@ export async function runWatchCycle(operations) {
     }
 
     await reportChildOutcomeToParent(queue, execution, operations.addComment);
-    const refreshedQueue = await operations.refreshQueue(queue.parent.identifier);
+    const refreshedQueue = await operations.refreshQueue(
+      queue.parent.identifier,
+    );
     await finalizeParentIfComplete(refreshedQueue, [execution], operations);
 
     return {
@@ -1139,10 +1370,15 @@ export async function runWatchCycle(operations) {
 }
 
 export async function runWatchMode(operations, options = {}) {
-  const pollIntervalMs = Number.isFinite(options.pollIntervalMs) ? Math.max(0, options.pollIntervalMs) : 60000;
-  const maxCycles = Number.isFinite(options.maxCycles) ? Math.max(0, options.maxCycles) : Number.POSITIVE_INFINITY;
+  const pollIntervalMs = Number.isFinite(options.pollIntervalMs)
+    ? Math.max(0, options.pollIntervalMs)
+    : 60000;
+  const maxCycles = Number.isFinite(options.maxCycles)
+    ? Math.max(0, options.maxCycles)
+    : Number.POSITIVE_INFINITY;
   const sleep = operations.sleep ?? defaultSleep;
-  const getNow = typeof options.getNow === "function" ? options.getNow : () => new Date();
+  const getNow =
+    typeof options.getNow === "function" ? options.getNow : () => new Date();
   const cycles = [];
 
   for (let cycleIndex = 0; cycleIndex < maxCycles; cycleIndex += 1) {

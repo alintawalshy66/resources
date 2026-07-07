@@ -13,7 +13,7 @@ Interview the user relentlessly about a plan or design until shared understandin
 - You need to resolve branching design decisions before implementation
 - The user asks to be grilled on a proposal
 - The plan has ambiguity that should be resolved before coding
-- The user invokes the skill with a Linear issue key such as `grill-me COA-96`
+- The user invokes the skill with a GitHub issue reference such as `grill-me #96`, `grill-me 96`, or a GitHub issue URL
 
 ## Core Principles
 
@@ -27,26 +27,25 @@ Interview the user relentlessly about a plan or design until shared understandin
 ## Workflow
 
 ### 0) Load issue context when provided
-- If the user includes a Linear issue key such as `COA-96`, fetch the issue before asking any questions.
-- Prefer the Linear CLI, e.g. `linear issue view COA-96`.
-- If that fails, inspect the workspace for a local Linear wrapper/extension and use it if available.
-- Only use another integration if no local Linear access exists in the current agent.
+- If the user includes a GitHub issue reference such as `#96`, `96`, or a GitHub issue URL, fetch the issue before asking any questions.
+- Prefer the GitHub CLI (`gh`), e.g. `gh issue view 96 --json number,title,body,labels,milestone,url`.
+- If that fails, ask whether to continue from the prompt alone or to authenticate/install `gh`.
 - Read the issue title and description carefully.
-- Treat the Linear issue description as the starting brief for the grilling session.
+- Treat the GitHub issue description as the starting brief for the grilling session.
 - If the issue cannot be fetched, tell the user and ask whether to continue from their prompt alone.
 
 ### 1) Frame the decision space
 - Identify the main design branches
 - Find the highest-risk unknowns first
 - Decide what must be answered before lower-level choices matter
-- Base the first branch on the Linear issue description when one was provided
+- Base the first branch on the GitHub issue description when one was provided
 - If a work-type selector is present, use it as context; if it is missing or ambiguous, continue and ask the user which work type applies
 
 ### 2) Ask one question
 - Ask a single focused question
 - Include your recommendation and reasoning
 - Keep the question concrete and actionable
-- Reference specific details from the Linear issue when relevant
+- Reference specific details from the GitHub issue when relevant
 
 ### 3) Wait for the answer
 - Do not batch multiple unrelated questions
@@ -81,7 +80,7 @@ A good grilling loop looks like:
 **The answer is already in the repo**
 - Explore the codebase and answer from evidence.
 
-**The user supplied a Linear issue key**
+**The user supplied a GitHub issue key**
 - Fetch the issue first, summarize the title/description briefly, then begin the one-question-at-a-time loop.
 
 **The plan is still ambiguous**

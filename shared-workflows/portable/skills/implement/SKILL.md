@@ -14,7 +14,7 @@ Ensure you have:
 2. A complete spec.md: `specs/{FEATURE_SLUG}/spec.md`
 3. Constitution routing entrypoint: `shared-workflows/references/constitution.md`
 4. You're on the feature branch: `{FEATURE_SLUG}`
-5. Linear issue marked as "Building" (will be set automatically)
+5. GitHub issue has `status:building` while implementation is active, when an issue is associated with the work
 
 ## Usage
 
@@ -36,14 +36,14 @@ Invoke this skill with:
    - Confirm spec.md exists and is readable
    - Verify `shared-workflows/references/constitution.md` is accessible
    - For this hard-gated skill, require exactly one valid work-type selector:
-     - Linear label: `wt:development` or `wt:process-automation`
-     - Non-Linear prompt header: `Work Type: development` or `Work Type: process-automation`
+     - GitHub issue label: `wt:development` or `wt:process-automation`
+     - Non-issue prompt header: `Work Type: development` or `Work Type: process-automation`
    - If the selector is missing, invalid, or duplicated, stop with recovery guidance
    - If the selector conflicts with the issue narrative, warn and proceed by selector
    - Load `## Core` plus the mapped work-type document
-   - Confirm Linear issue exists and is accessible
-   - Update Linear issue status to "Building" (if not already)
-   - Add comment: "Implementation started. Beginning execution windows."
+   - Confirm GitHub issue exists and is accessible
+   - If a GitHub issue is associated with the work, update it to `status:building` (if not already)
+   - Add a GitHub issue comment: "Implementation started. Beginning execution windows."
 
 3. **Initialize State Management**
    - Create/read `.planning/{FEATURE_SLUG}/STATE.md`
@@ -115,7 +115,7 @@ Invoke this skill with:
 22-26. **Integration & Documentation**
     - Run full test suite: `npm test`
     - Create IMPLEMENTATION_SUMMARY.md
-    - Update Linear issue: "Building" → "Review"
+    - If a GitHub issue is associated with the work, update it from `status:building` to `status:review`
     - Add comment with link to IMPLEMENTATION_SUMMARY.md
     - Display git status for final review
 
@@ -128,19 +128,19 @@ Invoke this skill with:
 ✅ **Constitution Compliance**: Every code decision checked against constitution
 ✅ **Evidence & Traceability**: Every task completion requires evidence
 
-## Linear Issue Status Lifecycle
+## GitHub Issue Status Lifecycle
 
-```
-Start: "Planning" → "Building" (comment: "Implementation started...")
-During: Status remains "Building"
-End: "Building" → "Review" (comment: "Implementation complete...")
+```text
+Start: status:ready-to-build or status:ready → status:building
+During: status remains status:building
+End: status:building → status:review, or close the issue when fully complete
 ```
 
 ## Tools Used
 
 - Bash — git commands, test execution, file operations
 - File system — create directories and copy files
-- Linear CLI — update issue status and comments
+- GitHub CLI (`gh`) — update issue labels, comments, and closure state
 
 ## Error Handling
 
@@ -150,8 +150,8 @@ End: "Building" → "Review" (comment: "Implementation complete...")
 **Not on feature branch:**
 → Stop. Show current branch and expected feature branch.
 
-**Linear CLI fails:**
-→ Tell user to check Linear CLI authentication and try again.
+**GitHub CLI (`gh`) fails:**
+→ Tell user to check `gh` installation/authentication and try again.
 
 **Test failures during checkpoint:**
 → Show failure details. Ask which task needs revision or if user wants to skip (with documentation).

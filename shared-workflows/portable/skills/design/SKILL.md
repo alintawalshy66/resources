@@ -1,11 +1,11 @@
 ---
 name: design
-description: Review and enhance a feature specification. The spec.md already exists from Linear—review it for completeness, check against constitutional principles, and enhance with additional detail if needed.
+description: Review and enhance a feature specification. The spec.md already exists from the upstream planning or GitHub issue workflow—review it for completeness, check against constitutional principles, and enhance with additional detail if needed.
 ---
 
 # Design Skill
 
-Review and enhance the feature specification that came from Linear.
+Review and enhance the feature specification that came from the upstream planning or GitHub issue workflow.
 
 ## How to Use
 
@@ -35,8 +35,8 @@ The skill reads the existing spec.md from the current feature branch and enhance
 1. **Load Constitution via canonical routing entrypoint**
    - Read `shared-workflows/references/constitution.md`
    - For this hard-gated skill, require exactly one valid work-type selector:
-     - Linear label: `wt:development` or `wt:process-automation`
-     - Non-Linear prompt header: `Work Type: development` or `Work Type: process-automation`
+     - GitHub issue label: `wt:development` or `wt:process-automation`
+     - Non-issue prompt header: `Work Type: development` or `Work Type: process-automation`
    - If the selector is missing, invalid, or duplicated, stop with recovery guidance
    - If the selector conflicts with the issue narrative, warn and proceed by selector
    - Load `## Core` plus the mapped work-type document
@@ -93,7 +93,7 @@ Review and enhance `specs/{FEATURE-SLUG}/spec.md` as needed.
    - Add missing entity definitions if gaps identified
 
 10. **Validate Edge Cases**
-    - Are known concerns from Linear issue addressed?
+    - Are known concerns from the GitHub issue or upstream brief addressed?
     - Are additional edge cases identified?
     - Include: empty states, error states, auth failures, boundary conditions
     - Add missing edge cases if gaps identified
@@ -168,7 +168,7 @@ Review and enhance `specs/{FEATURE-SLUG}/spec.md` as needed.
 
 ## Key Rules
 
-### Rule 1: Spec Comes from Linear
+### Rule 1: Spec Comes from the Upstream Planning Workflow
 - The spec.md is already written and complete
 - Your job is to enhance it, not rewrite it
 - Preserve the author's intent and language where it's sound
@@ -198,13 +198,13 @@ Review and enhance `specs/{FEATURE-SLUG}/spec.md` as needed.
 
 ## Output: Enhanced spec.md Structure
 
-The spec.md should follow this structure (enhanced from what came from Linear):
+The spec.md should follow this structure:
 
 ```markdown
 # Spec: {FEATURE-SLUG}
 
 **Status**: READY_FOR_DEV
-**Source**: {Linear Issue URL}
+**Source**: {GitHub Issue URL or upstream brief}
 **Priority**: {Priority}
 
 ## Summary
@@ -225,7 +225,7 @@ The spec.md should follow this structure (enhanced from what came from Linear):
 ...
 
 ### Edge Cases
-- [From Linear + additional identified]
+- [From GitHub issue/upstream brief + additional identified]
 
 ---
 

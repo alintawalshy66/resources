@@ -16,7 +16,7 @@ Use one of these options:
 
 ## Current extensions
 
-- `crosby/` — Linear execution orchestrator
+- `crosby/` — GitHub Issues execution orchestrator
 
 ## How to make Pi load Crosby
 

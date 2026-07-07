@@ -36,5 +36,11 @@
   "notes": [
     "Portable content should remain model-agnostic.",
     "Tool-specific runtime behavior belongs in the tool-specific folders."
-  ]
+  ],
+  "references": {
+    "github-issue-workflow": "shared-workflows/references/github-issue-workflow.md"
+  },
+  "scripts": {
+    "bootstrap-github-labels": "scripts/bootstrap-github-labels.sh"
+  }
 }

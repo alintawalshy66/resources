@@ -70,7 +70,7 @@ Use the shared workflow skills when the task fits them. Common examples include:
 - TDD execution: `tdd`
 - feature implementation: `implement`
 - review / enforcement: `code-reviewer`
-- issue conversion: `to-prd`, `to-issues` (use `to-issues` when child Linear issues must inherit the parent project's labels and project)
+- issue conversion: `to-prd`, `to-issues` (use `to-issues` when child GitHub issues must inherit the parent issue's labels and milestone)
 
 If more than one workflow seems relevant, choose the smallest skill needed for the current step.
 
