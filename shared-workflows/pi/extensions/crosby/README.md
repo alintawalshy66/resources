@@ -85,7 +85,7 @@ The parent should have:
 
 - `type:parent`
 - `status:ready` or `status:execute`
-- a work-type label such as `wt:development`
+- a work-type label such as `development`
 - a local folder routing label, such as `dlhub`, when Crosby must choose a checkout
 - an optional `Branch: branch-name` line or `branch:<name>` label; otherwise Crosby derives a branch name from the issue number/title
 - a milestone shared with its children, when useful
@@ -109,7 +109,6 @@ Runnable child issues should have:
 - `type:child`
 - `status:ready-to-build`
 - `mode:afk`
-- matching `wt:*` label
 - same milestone as parent, when useful
 
 Human-in-the-loop child issues should have:
