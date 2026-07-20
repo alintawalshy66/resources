@@ -15,21 +15,21 @@ Legacy detailed development constitution retained below while routing is introdu
 Original sync header preserved for traceability.
 
 Sync Impact Report
-- Version change: 1.12.1 -> 1.13.0
-- Shared repo version: 1.0.6
-- Modified principles: none
-- Added principles: X. Deep Modules (NON-NEGOTIABLE)
-- Added clarifications: none
+- Version change: 1.13.0 -> 1.14.0
+- Shared repo version: 1.0.7
+- Modified principles: IX. Cross-Feature Consistency & Review Enforcement; X. Deep Modules
+- Added principles: XI. Change Classification & TDD Gate (NON-NEGOTIABLE)
+- Added clarifications: intent-source traceability replaces spec-only traceability
 - Renumbered sections: none
 - Removed sections: none
 - Templates requiring updates: none
 - Follow-up TODOs: none
 -->
 
-# CoachCW Constitution (v1.13.0)
+# CoachCW Constitution (v1.14.0)
 
 **Shared repo location**: `shared-workflows/references/constitution.md`
-**Shared repo version**: `1.0.5`
+**Shared repo version**: `1.0.7`
 
 ## Purpose, Users & Scope
 
@@ -277,20 +277,28 @@ Every feature MUST:
 Before merge, every feature MUST undergo structured review.
 
 Review must confirm:
-- Spec → Implementation → Test traceability.
+- Intent → Implementation → Test traceability, using the best available intent source rather than requiring a spec.
 - No cross-layer leakage.
 - No duplication of domain logic.
 - No legacy artifacts.
 - Consistency with existing module structure and design patterns.
+
+Intent sources are resolved in priority order:
+1. GitHub issue or PR description when present.
+2. Explicit review brief or current conversation context.
+3. Commit messages and changed files.
+4. Diff-only architectural/test/safety review when intent is unavailable.
+
+Absence of a formal spec MUST NOT block review, but the reviewer MUST state when intent traceability is unavailable.
 
 #### Intentional Deviations
 
 If a feature intentionally deviates from established patterns,
 the deviation MUST be:
 
-- Documented explicitly in the feature spec.
+- Documented explicitly in the issue, PR, review brief, or other available intent source.
 - Justified with trade-off analysis.
-- Approved before implementation.
+- Approved before implementation when the deviation is known in advance, or called out in review when discovered after implementation.
 - Accompanied by updated documentation if the deviation becomes the new standard.
 
 Architectural drift across features is considered a systemic defect and MUST be corrected before merge.
@@ -326,3 +334,40 @@ A module is too shallow and MUST be refactored when either signal is present:
 2. **Named intent violation** — a public method name that mirrors the name of an underlying dependency method (e.g. a Prisma method) signals that the abstraction is hiding nothing meaningful.
 
 Violations of this principle are **architectural defects** and MUST be corrected before merge.
+
+---
+
+### XI. Change Classification & TDD Gate (NON-NEGOTIABLE)
+
+Before implementation or review, every change MUST be classified by risk and behavioral impact. This gate decides whether test-first development is required.
+
+**Change classes**
+
+1. **Trivial non-behavior change**
+   - Examples: label text, copy, comments, documentation, formatting, dead-code deletion where behavior is clearly unchanged.
+   - TDD is NOT required.
+   - Manual verification is acceptable, but the verification note MUST identify what was checked.
+
+2. **Behavior change**
+   - Examples: domain logic, API behavior, validation, state transitions, UI interaction, data fetching, error handling, persistence, authorization, feature gating.
+   - TDD is REQUIRED.
+   - The change MUST include test evidence for the observable behavior.
+
+3. **Bug fix**
+   - TDD is REQUIRED.
+   - The change MUST include a regression test that fails before the fix and passes after it.
+
+4. **Structural refactor or deep-module extraction**
+   - TDD is REQUIRED unless the reviewer can prove the refactor is purely mechanical and behavior-preserving.
+   - Tests MUST exercise the public seam of the module or prove preservation through existing public behavior tests.
+   - New deep-module interfaces SHOULD have direct unit tests at the interface boundary.
+
+5. **Ambiguous change**
+   - If the change cannot be confidently classified as non-behavioral, it MUST be treated as a behavior change.
+
+**Review enforcement**
+
+- Missing test evidence for behavior changes, bug fixes, or new module seams is a review failure.
+- Manual testing alone is acceptable only for trivial non-behavior changes or when explicitly documented as temporary risk accepted by the reviewer/user.
+- Agents MUST NOT invent needless tests for obvious copy/documentation/formatting-only edits.
+- Agents MUST NOT skip tests for behavior changes because the work is small or lacks a formal issue/spec.

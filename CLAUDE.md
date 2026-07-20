@@ -90,6 +90,29 @@ If more than one workflow seems relevant, choose the smallest skill needed for t
 
 ---
 
+## Change Classification Gate
+Before changing code, classify the work:
+
+1. **Trivial non-behavior change** — labels, copy, docs, comments, formatting, or obvious dead-code deletion. TDD is not required; include a brief manual verification note when appropriate.
+2. **Behavior change** — domain logic, API behavior, validation, state transitions, UI interaction, data fetching, error handling, persistence, authorization, or feature gating. Use TDD: write/identify the failing behavior test before production changes.
+3. **Bug fix** — add a regression test that fails before the fix and passes after it.
+4. **Structural refactor / deep-module extraction** — preserve behavior with tests at the public seam or existing public behavior tests; add direct interface tests for new deep module seams when useful.
+5. **Ambiguous** — treat as a behavior change until clarified.
+
+Do not invent needless tests for obvious copy/documentation/formatting-only edits. Do not skip tests for behavior changes because the change is small or lacks a formal issue/spec.
+
+---
+
+## Deep Module Guidance
+- Prefer deep modules with small, stable, testable interfaces over many shallow pass-through files.
+- A function or method that only forwards arguments unchanged to one dependency is a design smell and should usually be removed or deepened.
+- Public method names should express domain intent, not underlying library mechanics.
+- Route handlers should parse input, call a service, and return output; domain logic belongs in services/modules.
+- Repositories should hide query construction and ownership scoping from callers.
+- React components should delegate data-fetching/domain state to hooks or dedicated modules; test components by mocking seams and test seams independently.
+
+---
+
 ## Git Rules
 - Always create new commits. Never amend.
 - Never push to remote without explicit confirmation.

@@ -95,7 +95,13 @@ function getStatusTypeFromStatusName(statusName: string) {
 function parseChildIssueRefs(body: string | undefined) {
   const refs: string[] = [];
   const seen = new Set<string>();
-  for (const match of String(body ?? "").matchAll(/(?:^|[^\w/])#(\d+)\b/gm)) {
+  const text = String(body ?? "");
+  const childSectionMatch = text.match(
+    /(?:^|\n)##\s+Child Issues\s*\n([\s\S]*?)(?=\n##\s+|$)/i,
+  );
+  const searchable = childSectionMatch?.[1] ?? "";
+
+  for (const match of searchable.matchAll(/(?:^|[^\w/])#(\d+)\b/gm)) {
     const ref = match[1];
     if (!seen.has(ref)) {
       seen.add(ref);
@@ -571,6 +577,11 @@ async function hasUncommittedGitChanges(pi: ExtensionAPI, cwd: string) {
   return result.stdout.trim().length > 0;
 }
 
+async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
+  const result = await execGit(pi, ["rev-parse", revision], cwd);
+  return result.stdout.trim();
+}
+
 async function assertCleanWorkingTree(
   pi: ExtensionAPI,
   cwd: string,
@@ -627,13 +638,24 @@ async function ensureParentBranch(
   const currentBranch = await getCurrentGitBranch(pi, cwd);
   if (currentBranch === branchName) return;
 
-  if (await hasUncommittedGitChanges(pi, cwd)) {
+  const dirty = await hasUncommittedGitChanges(pi, cwd);
+  const hasLocalTarget = await hasLocalGitBranch(pi, cwd, branchName);
+  if (dirty) {
+    if (hasLocalTarget) {
+      const currentRevision = await getGitRevision(pi, cwd, "HEAD");
+      const targetRevision = await getGitRevision(pi, cwd, branchName);
+      if (currentRevision === targetRevision) {
+        await execGit(pi, ["checkout", branchName], cwd);
+        return;
+      }
+    }
+
     throw new Error(
-      `Cannot switch ${cwd} from branch ${currentBranch || "(detached HEAD)"} to ${branchName} for parent ${issueKey} because the working tree has uncommitted changes. Recovery: commit, stash, or discard the local changes in ${cwd}, then rerun /crosby ${issueKey}.`,
+      `Cannot switch ${cwd} from branch ${currentBranch || "(detached HEAD)"} to ${branchName} for parent ${issueKey} because the working tree has uncommitted changes. Recovery: if these changes belong to this parent run and ${branchName} points at the same commit, run 'git switch ${branchName}' from ${cwd} and rerun /crosby ${issueKey}; otherwise commit, stash, or discard the local changes first.`,
     );
   }
 
-  if (await hasLocalGitBranch(pi, cwd, branchName)) {
+  if (hasLocalTarget) {
     await execGit(pi, ["checkout", branchName], cwd);
   } else if (await hasRemoteGitBranch(pi, cwd, branchName)) {
     await execGit(
