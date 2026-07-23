@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  extractEffortOverride,
+  extractLabelValue,
+  extractModelOverride,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -366,4 +369,155 @@ test("runWatchMode stays idle across later cycles when no execute parents exist"
   assert.equal(result.cycles.length, 2);
   assert.equal(cycles[0].status, "idle");
   assert.equal(cycles[1].status, "idle");
+});
+
+test("extractLabelValue returns the value after the prefix", () => {
+  const child = { labels: ["type:child", "model:gpt-5.5"] };
+  assert.equal(extractLabelValue(child, "model:"), "gpt-5.5");
+});
+
+test("extractLabelValue returns null when the prefix is absent", () => {
+  const child = { labels: ["type:child", "dlhub"] };
+  assert.equal(extractLabelValue(child, "model:"), null);
+});
+
+test("extractLabelValue trims whitespace and rejects empty values", () => {
+  const child = { labels: ["model:   "] };
+  assert.equal(extractLabelValue(child, "model:"), null);
+});
+
+test("extractLabelValue supports object-shaped labels", () => {
+  const child = {
+    labels: [{ name: "type:child" }, { name: "effort:medium" }],
+  };
+  assert.equal(extractLabelValue(child, "effort:"), "medium");
+});
+
+test("extractLabelValue supports GraphQL-style nodes labels", () => {
+  const child = {
+    labels: { nodes: [{ name: "model:claude-opus-4.7" }, { name: "dlhub" }] },
+  };
+  assert.equal(extractLabelValue(child, "model:"), "claude-opus-4.7");
+});
+
+test("extractLabelValue returns the first match when multiple prefixed labels exist", () => {
+  const child = { labels: ["model:gpt-5.5", "model:claude-opus-4.7"] };
+  assert.equal(extractLabelValue(child, "model:"), "gpt-5.5");
+});
+
+test("extractLabelValue returns null for empty or missing prefix", () => {
+  const child = { labels: ["model:gpt-5.5"] };
+  assert.equal(extractLabelValue(child, ""), null);
+  assert.equal(extractLabelValue(child, undefined), null);
+});
+
+test("extractModelOverride wraps extractLabelValue with the model: prefix", () => {
+  assert.equal(extractModelOverride({ labels: ["model:gpt-5.5"] }), "gpt-5.5");
+  assert.equal(extractModelOverride({ labels: ["dlhub"] }), null);
+  assert.equal(extractModelOverride(null), null);
+});
+
+test("extractEffortOverride wraps extractLabelValue with the effort: prefix", () => {
+  assert.equal(extractEffortOverride({ labels: ["effort:high"] }), "high");
+  assert.equal(extractEffortOverride({ labels: ["dlhub"] }), null);
+  assert.equal(extractEffortOverride(null), null);
+});
+
+test("runWatchCycle forwards model and effort labels into runWorker", async () => {
+  const workerCalls = [];
+  await runWatchCycle({
+    fetchExecuteParentQueues: async () => [
+      {
+        parent: {
+          identifier: "#200",
+          title: "Model routing",
+          state: { name: "Execute", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#201",
+            title: "Frontend slice",
+            state: { name: "Ready to Build", type: "unstarted" },
+            labels: [
+              "type:child",
+              "dlhub",
+              "model:claude-opus-4.7",
+              "effort:medium",
+            ],
+          },
+        ],
+      },
+    ],
+    moveIssue: async () => {},
+    addComment: async () => {},
+    ensureParentBranch: async () => {},
+    refreshQueue: async () => null,
+    loadIssue: async () => null,
+    runWorker: async (call) => {
+      workerCalls.push(call);
+      return {
+        stdout: JSON.stringify({
+          issueKey: "#201",
+          issueTitle: "Frontend slice",
+          outcome: "done",
+          summary: "Completed",
+          changes: [],
+          tests: [],
+          requiredHumanAction: "",
+          recoveryNotes: [],
+        }),
+      };
+    },
+  });
+
+  assert.equal(workerCalls.length, 1);
+  assert.equal(workerCalls[0].model, "claude-opus-4.7");
+  assert.equal(workerCalls[0].effort, "medium");
+});
+
+test("runWatchCycle passes null model and effort when labels are absent", async () => {
+  const workerCalls = [];
+  await runWatchCycle({
+    fetchExecuteParentQueues: async () => [
+      {
+        parent: {
+          identifier: "#300",
+          title: "Default routing",
+          state: { name: "Execute", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#301",
+            title: "Backend slice",
+            state: { name: "Ready to Build", type: "unstarted" },
+            labels: ["type:child", "dlhub"],
+          },
+        ],
+      },
+    ],
+    moveIssue: async () => {},
+    addComment: async () => {},
+    ensureParentBranch: async () => {},
+    refreshQueue: async () => null,
+    loadIssue: async () => null,
+    runWorker: async (call) => {
+      workerCalls.push(call);
+      return {
+        stdout: JSON.stringify({
+          issueKey: "#301",
+          issueTitle: "Backend slice",
+          outcome: "done",
+          summary: "Completed",
+          changes: [],
+          tests: [],
+          requiredHumanAction: "",
+          recoveryNotes: [],
+        }),
+      };
+    },
+  });
+
+  assert.equal(workerCalls.length, 1);
+  assert.equal(workerCalls[0].model, null);
+  assert.equal(workerCalls[0].effort, null);
 });

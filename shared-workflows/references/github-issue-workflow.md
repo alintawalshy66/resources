@@ -43,6 +43,15 @@ These labels route constitution checks for hard-gated skills.
 
 A label matching a local folder name may be used to route Crosby to the correct checkout. For example, if the local repo lives at `/home/walsc0/projects/dlhub`, add a `dlhub` label to the parent or child issue.
 
+### Optional Pi worker overrides
+
+A child issue may set a specific Pi model and/or reasoning effort for its worker:
+
+- `model:<model-id>` — e.g. `model:gpt-5.5`, `model:claude-opus-4.7`.
+- `effort:<level>` — e.g. `effort:medium`, `effort:high`.
+
+If either label is absent, the worker uses Pi's normal config default. Crosby does not validate the values; unknown IDs surface as Pi worker errors. When multiple `model:*` or `effort:*` labels are set on the same issue, the first one wins.
+
 ## Parent issue format
 
 A parent issue should include a child issue checklist. The checklist is the canonical child order.

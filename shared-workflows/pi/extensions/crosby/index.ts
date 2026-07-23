@@ -773,13 +773,29 @@ function appendWorkerTranscript(pi: ExtensionAPI, event: any) {
 async function runIsolatedWorker(
   pi: ExtensionAPI,
   prompt: string,
-  cwd?: string,
+  opts: { cwd?: string; model?: string | null; effort?: string | null } = {},
 ) {
   const invocation = getPiInvocation();
+  const extraArgs: string[] = [];
+  if (opts.model) {
+    extraArgs.push("--model", opts.model);
+  }
+  if (opts.effort) {
+    extraArgs.push("--effort", opts.effort);
+  }
+
   const result = await pi.exec(
     invocation.command,
-    [...invocation.args, "--mode", "text", "-p", "--no-session", prompt],
-    cwd ? { cwd } : undefined,
+    [
+      ...invocation.args,
+      ...extraArgs,
+      "--mode",
+      "text",
+      "-p",
+      "--no-session",
+      prompt,
+    ],
+    opts.cwd ? { cwd: opts.cwd } : undefined,
   );
 
   if (result.code !== 0) {
@@ -818,8 +834,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 moveIssue(pi, targetIssueKey, state),
               addComment: (targetIssueKey, body) =>
                 addIssueComment(pi, targetIssueKey, body),
-              runWorker: ({ prompt, cwd }) =>
-                runIsolatedWorker(pi, prompt, cwd),
+              runWorker: ({ prompt, cwd, model, effort }) =>
+                runIsolatedWorker(pi, prompt, { cwd, model, effort }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
               refreshQueue: (parentIssueKey) =>
@@ -945,7 +961,7 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             moveIssue(pi, targetIssueKey, state),
           addComment: (targetIssueKey, body) =>
             addIssueComment(pi, targetIssueKey, body),
-          runWorker: ({ prompt, cwd }) => runIsolatedWorker(pi, prompt, cwd),
+          runWorker: ({ prompt, cwd, model, effort }) => runIsolatedWorker(pi, prompt, { cwd, model, effort }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
           refreshQueue: (parentIssueKey) =>

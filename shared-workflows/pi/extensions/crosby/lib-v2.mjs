@@ -126,6 +126,23 @@ function getIssueLabelNames(issue) {
   return [];
 }
 
+export function extractLabelValue(issue, prefix) {
+  if (typeof prefix !== "string" || prefix.length === 0) return null;
+  const labels = getIssueLabelNames(issue);
+  const hit = labels.find((label) => label.startsWith(prefix));
+  if (!hit) return null;
+  const value = hit.slice(prefix.length).trim();
+  return value.length > 0 ? value : null;
+}
+
+export function extractModelOverride(issue) {
+  return extractLabelValue(issue, "model:");
+}
+
+export function extractEffortOverride(issue) {
+  return extractLabelValue(issue, "effort:");
+}
+
 export function resolveIssueWorkingDirectory(issue, options = {}) {
   const documentsRoot = options.documentsRoot ?? DEFAULT_DOCUMENTS_ROOT;
   const projectsRoot =
@@ -1181,6 +1198,8 @@ export async function runSingleChildExecution(queue, operations) {
     childIssueKey: child.identifier,
     prompt: workerPrompt,
     cwd: routing?.cwd,
+    model: extractModelOverride(child),
+    effort: extractEffortOverride(child),
   });
   const workerResult = parseStructuredWorkerResult(rawWorkerResult, child);
 
