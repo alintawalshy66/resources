@@ -46,6 +46,8 @@ It uses:
 
 - **Pi build worker** for child implementation
   - model is inherited from normal Pi resolution/config
+  - the Crosby control tab renders a live dashboard of parent child issues, including queued/in-progress/done/review/fatal state and worker pane IDs when available
+  - when Crosby itself is running inside Herdr, each build worker starts as an interactive Pi agent in its own Herdr tab by default so progress/tool calls are visible while watch/manual execution loops
 - **Claude review worker** for explicit PR review
   - default model: `claude-sonnet-4-6`
   - default effort: `medium`
@@ -140,7 +142,7 @@ What happens:
 3. Picks the next unblocked child with `status:ready-to-build`.
 4. Ensures the repo is on the parent feature branch.
 5. Moves that child to `status:building`.
-6. Runs the Pi worker.
+6. Runs the Pi worker with a persistent session named from the child issue number (for example `gh-135`) so it is easy to find later with `pi -r` / `/resume`.
 7. Moves the child to:
    - closed if complete
    - `status:review` if human review/action is needed
@@ -161,7 +163,7 @@ Current behavior:
 - picks the next unblocked child with `status:ready-to-build`
 - ensures the repo is on the parent feature branch
 - moves that child to `status:building`
-- runs the Pi worker
+- runs the Pi worker with a persistent `gh-<issue-number>` session name for resume lookup
 - posts progress back to the parent
 - when all child issues are closed, posts the final summary and moves the parent to `status:review`
 
@@ -237,9 +239,12 @@ Optional environment variables:
 
 - `CROSBY_CLAUDE_MODEL`
 - `CROSBY_CLAUDE_EFFORT`
+- `CROSBY_HERDR_PANES=0` disables automatic Herdr worker terminals when Crosby is running inside Herdr
+- `CROSBY_HERDR_LAYOUT=tab|pane` chooses worker display layout when running inside Herdr; default is `tab`
 - `GH_BIN`
 - `GIT_BIN`
 - `CLAUDE_BIN`
+- `HERDR_BIN`
 
 Pi build workers inherit model selection from normal Pi config/session resolution.
 

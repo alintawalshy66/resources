@@ -1,8 +1,20 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import {
+  createCrosbyDashboard,
+  markDashboardExecutionFinalized,
+  markDashboardExecutionFinished,
+  markDashboardExecutionStarted,
+  markDashboardFatalError,
+  markDashboardHerdrWorkerStarted,
+  reconcileDashboardFromQueue,
+  renderCrosbyDashboard,
+} from "./dashboard.mjs";
+import {
+  buildPiWorkerSessionName,
   fetchParentQueue,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
@@ -25,6 +37,57 @@ const DEFAULT_CROSBY_CLAUDE_MODEL =
   process.env.CROSBY_CLAUDE_MODEL?.trim() || "claude-sonnet-4-6";
 const DEFAULT_CROSBY_CLAUDE_EFFORT =
   process.env.CROSBY_CLAUDE_EFFORT?.trim() || "medium";
+
+function updateCrosbyDashboardWidget(ctx: any, dashboard: any) {
+  if (!dashboard || typeof ctx?.ui?.setWidget !== "function") return;
+  try {
+    ctx.ui.setWidget("crosby-dashboard", renderCrosbyDashboard(dashboard), {
+      placement: "aboveEditor",
+    });
+  } catch {
+    // Dashboard rendering is best-effort and should never stop Crosby execution.
+  }
+}
+
+function createCrosbyDashboardController(ctx: any, queue: any, mode: string) {
+  let dashboard = createCrosbyDashboard(queue, { mode });
+  updateCrosbyDashboardWidget(ctx, dashboard);
+
+  return {
+    get dashboard() {
+      return dashboard;
+    },
+    reset(nextQueue: any, nextMode = mode) {
+      dashboard = createCrosbyDashboard(nextQueue, { mode: nextMode });
+      updateCrosbyDashboardWidget(ctx, dashboard);
+      return dashboard;
+    },
+    executionStarted(event: any) {
+      markDashboardExecutionStarted(dashboard, event);
+      updateCrosbyDashboardWidget(ctx, dashboard);
+    },
+    herdrWorkerStarted(event: any) {
+      markDashboardHerdrWorkerStarted(dashboard, event);
+      updateCrosbyDashboardWidget(ctx, dashboard);
+    },
+    executionFinished(event: any) {
+      markDashboardExecutionFinished(dashboard, event);
+      updateCrosbyDashboardWidget(ctx, dashboard);
+    },
+    executionFinalized(event: any) {
+      markDashboardExecutionFinalized(dashboard, event);
+      updateCrosbyDashboardWidget(ctx, dashboard);
+    },
+    queueRefreshed(queue: any) {
+      reconcileDashboardFromQueue(dashboard, queue);
+      updateCrosbyDashboardWidget(ctx, dashboard);
+    },
+    fatal(error: unknown) {
+      markDashboardFatalError(dashboard, error);
+      updateCrosbyDashboardWidget(ctx, dashboard);
+    },
+  };
+}
 
 function getClaudeInvocation(args: string[]) {
   const configured = process.env.CLAUDE_BIN?.trim();
@@ -170,6 +233,18 @@ function toCrosbyIssue(githubIssue: any, children: any[] = []) {
   };
 }
 
+const GITHUB_TRANSIENT_RETRY_DELAYS_MS = [500, 1500, 3000];
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientGitHubCliFailure(details: string) {
+  return /\b(eof|timeout|timed out|connection reset|connection refused|tls handshake timeout|temporary failure|service unavailable|502 bad gateway|503 service unavailable|504 gateway timeout)\b/i.test(
+    details,
+  );
+}
+
 async function execGhJson(
   pi: ExtensionAPI,
   args: string[],
@@ -177,31 +252,51 @@ async function execGhJson(
   options?: { cwd?: string },
 ) {
   const invocation = getGhInvocation(args);
-  const result = await pi.exec(
-    invocation.command,
-    invocation.args,
-    options?.cwd ? { cwd: options.cwd } : undefined,
-  );
+  let lastDetails = "";
 
-  if (result.code !== 0) {
-    const details = [result.stderr, result.stdout]
+  for (
+    let attempt = 0;
+    attempt <= GITHUB_TRANSIENT_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    const result = await pi.exec(
+      invocation.command,
+      invocation.args,
+      options?.cwd ? { cwd: options.cwd } : undefined,
+    );
+
+    if (result.code === 0) {
+      try {
+        return JSON.parse(result.stdout || "null");
+      } catch (error) {
+        throw new Error(
+          `${errorContext}. Failed to parse GitHub CLI JSON: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    lastDetails = [result.stderr, result.stdout]
       .filter(Boolean)
       .join("\n")
       .trim();
-    throw new Error(
-      details
-        ? `${errorContext}. ${details}`
-        : `${errorContext}. GitHub command: ${invocation.command}. Exit code: ${result.code}.`,
-    );
+
+    const retryDelay = GITHUB_TRANSIENT_RETRY_DELAYS_MS[attempt];
+    if (retryDelay === undefined || !isTransientGitHubCliFailure(lastDetails)) {
+      throw new Error(
+        lastDetails
+          ? `${errorContext}. ${lastDetails}`
+          : `${errorContext}. GitHub command: ${invocation.command}. Exit code: ${result.code}.`,
+      );
+    }
+
+    await sleep(retryDelay);
   }
 
-  try {
-    return JSON.parse(result.stdout || "null");
-  } catch (error) {
-    throw new Error(
-      `${errorContext}. Failed to parse GitHub CLI JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  throw new Error(
+    lastDetails
+      ? `${errorContext}. ${lastDetails}`
+      : `${errorContext}. GitHub command: ${invocation.command}.`,
+  );
 }
 
 async function loadIssueFromGitHub(
@@ -748,6 +843,150 @@ function getPiInvocation() {
   return { command: "pi", args: [] };
 }
 
+function getHerdrInvocation(args: string[]) {
+  const configured = process.env.HERDR_BIN?.trim();
+  return { command: configured || "herdr", args };
+}
+
+function shouldRunWorkersInHerdrPanes() {
+  const setting = String(process.env.CROSBY_HERDR_PANES ?? "")
+    .trim()
+    .toLowerCase();
+  if (["0", "false", "no", "off"].includes(setting)) return false;
+  return process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
+}
+
+function getHerdrWorkerLayout() {
+  const setting = String(process.env.CROSBY_HERDR_LAYOUT ?? "tab")
+    .trim()
+    .toLowerCase();
+  return setting === "pane" ? "pane" : "tab";
+}
+
+function parseHerdrPaneId(output: string) {
+  try {
+    const parsed = JSON.parse(output);
+    const paneId =
+      parsed?.result?.root_pane?.pane_id ??
+      parsed?.result?.pane?.pane_id ??
+      parsed?.root_pane?.pane_id ??
+      parsed?.pane?.pane_id;
+    return typeof paneId === "string" && paneId ? paneId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function openHerdrWorkerPane(
+  pi: ExtensionAPI,
+  label: string,
+  cwd?: string,
+) {
+  if (getHerdrWorkerLayout() === "pane") {
+    const splitArgs = [
+      "pane",
+      "split",
+      process.env.HERDR_PANE_ID!,
+      "--direction",
+      "right",
+      "--no-focus",
+      ...(cwd ? ["--cwd", cwd] : []),
+    ];
+    return execHerdr(
+      pi,
+      splitArgs,
+      "Failed to open Herdr pane for Crosby worker",
+    );
+  }
+
+  const tabArgs = [
+    "tab",
+    "create",
+    "--label",
+    label,
+    "--no-focus",
+    ...(process.env.HERDR_WORKSPACE_ID
+      ? ["--workspace", process.env.HERDR_WORKSPACE_ID]
+      : []),
+    ...(cwd ? ["--cwd", cwd] : []),
+  ];
+  return execHerdr(pi, tabArgs, "Failed to open Herdr tab for Crosby worker");
+}
+
+function makeHerdrAgentName(issueKey?: string | null) {
+  const issuePart = String(issueKey ?? "worker")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 12);
+  const suffix = Date.now().toString(36).slice(-8);
+  return `crosby-${issuePart || "worker"}-${suffix}`.slice(0, 32);
+}
+
+function buildInteractiveWorkerPrompt(prompt: string, resultPath: string) {
+  return [
+    prompt,
+    "",
+    "Crosby interactive-pane result capture:",
+    `- Before you finish, write the final structured JSON result to this exact file path using the write tool: ${resultPath}`,
+    "- The file content must be the JSON object only, with no Markdown fences and no commentary.",
+    "- The JSON object must still match the schema requested above.",
+    "- After writing the file, also make your final assistant response the same JSON object only.",
+  ].join("\n");
+}
+
+async function execHerdr(
+  pi: ExtensionAPI,
+  args: string[],
+  errorContext: string,
+) {
+  const invocation = getHerdrInvocation(args);
+  const result = await pi.exec(invocation.command, invocation.args);
+  if (result.code !== 0) {
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    throw new Error(
+      details
+        ? `${errorContext}. ${details}`
+        : `${errorContext}. Herdr command: ${invocation.command}. Exit code: ${result.code}.`,
+    );
+  }
+  return result;
+}
+
+function isHerdrPaneNotReadyForAgent(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("agent_pane_busy") ||
+    message.includes("not an available shell")
+  );
+}
+
+async function startHerdrAgentWithRetry(
+  pi: ExtensionAPI,
+  args: string[],
+  errorContext: string,
+) {
+  const attempts = 6;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await execHerdr(pi, args, errorContext);
+    } catch (error) {
+      lastError = error;
+      if (!isHerdrPaneNotReadyForAgent(error) || attempt === attempts) {
+        throw error;
+      }
+      await sleep(250 * attempt);
+    }
+  }
+
+  throw lastError;
+}
+
 function formatIssuePath(path: any[] | undefined) {
   return (Array.isArray(path) ? path : [])
     .map((issue) => issue?.identifier)
@@ -773,9 +1012,20 @@ function appendWorkerTranscript(pi: ExtensionAPI, event: any) {
 async function runIsolatedWorker(
   pi: ExtensionAPI,
   prompt: string,
-  opts: { cwd?: string; model?: string | null; effort?: string | null } = {},
+  opts: {
+    cwd?: string;
+    model?: string | null;
+    effort?: string | null;
+    issueKey?: string | null;
+    onHerdrWorkerStarted?: (event: any) => void | Promise<void>;
+  } = {},
 ) {
+  if (shouldRunWorkersInHerdrPanes()) {
+    return runIsolatedWorkerInHerdrPane(pi, prompt, opts);
+  }
+
   const invocation = getPiInvocation();
+  const sessionName = buildPiWorkerSessionName(opts.issueKey);
   const extraArgs: string[] = [];
   if (opts.model) {
     extraArgs.push("--model", opts.model);
@@ -789,10 +1039,11 @@ async function runIsolatedWorker(
     [
       ...invocation.args,
       ...extraArgs,
+      "--name",
+      sessionName,
       "--mode",
       "text",
       "-p",
-      "--no-session",
       prompt,
     ],
     opts.cwd ? { cwd: opts.cwd } : undefined,
@@ -813,11 +1064,130 @@ async function runIsolatedWorker(
   return result;
 }
 
+async function runIsolatedWorkerInHerdrPane(
+  pi: ExtensionAPI,
+  prompt: string,
+  opts: {
+    cwd?: string;
+    model?: string | null;
+    effort?: string | null;
+    issueKey?: string | null;
+    onHerdrWorkerStarted?: (event: any) => void | Promise<void>;
+  },
+) {
+  const sessionName = buildPiWorkerSessionName(opts.issueKey);
+  const extraArgs: string[] = [];
+  if (opts.model) {
+    extraArgs.push("--model", opts.model);
+  }
+  if (opts.effort) {
+    extraArgs.push("--effort", opts.effort);
+  }
+
+  const workDir = await mkdtemp(path.join(os.tmpdir(), "crosby-worker-"));
+  const promptPath = path.join(workDir, "prompt.md");
+  const resultPath = path.join(workDir, "result.json");
+  const stderrPath = path.join(workDir, "stderr.txt");
+  const interactivePrompt = buildInteractiveWorkerPrompt(prompt, resultPath);
+  await writeFile(promptPath, interactivePrompt, "utf8");
+  const label = opts.issueKey ? `Crosby ${opts.issueKey}` : "Crosby worker";
+  const agentName = makeHerdrAgentName(opts.issueKey);
+  const opened = await openHerdrWorkerPane(pi, label, opts.cwd);
+  const paneId = parseHerdrPaneId(opened.stdout);
+  if (!paneId) {
+    throw new Error(
+      "Failed to open Herdr worker terminal. Herdr did not return a pane id.",
+    );
+  }
+
+  if (getHerdrWorkerLayout() === "pane") {
+    try {
+      await execHerdr(
+        pi,
+        ["pane", "rename", paneId, label],
+        "Failed to label Herdr pane for Crosby worker",
+      );
+    } catch {
+      // Pane labeling is best-effort; keep the worker running even if rename fails.
+    }
+  }
+
+  await startHerdrAgentWithRetry(
+    pi,
+    [
+      "agent",
+      "start",
+      agentName,
+      "--kind",
+      "pi",
+      "--pane",
+      paneId,
+      "--",
+      ...extraArgs,
+      "--name",
+      sessionName,
+    ],
+    "Failed to start interactive Pi worker in Herdr pane",
+  );
+
+  if (typeof opts.onHerdrWorkerStarted === "function") {
+    await opts.onHerdrWorkerStarted({
+      issueKey: opts.issueKey ?? null,
+      paneId,
+      agentName,
+      label,
+      cwd: opts.cwd ?? null,
+    });
+  }
+
+  await execHerdr(
+    pi,
+    ["agent", "prompt", agentName, interactivePrompt, "--wait"],
+    "Interactive Pi worker failed before settling",
+  );
+
+  let stdout = "";
+  try {
+    stdout = (await readFile(resultPath, "utf8")).trim();
+  } catch {
+    const transcript = await execHerdr(
+      pi,
+      [
+        "agent",
+        "read",
+        agentName,
+        "--source",
+        "recent-unwrapped",
+        "--lines",
+        "200",
+      ],
+      "Failed to read interactive Pi worker transcript after missing result file",
+    ).catch((error) => ({
+      stdout: error instanceof Error ? error.message : String(error),
+    }));
+    throw new Error(
+      `Interactive Pi worker in Herdr pane ${paneId} did not write ${resultPath}. ` +
+        `Recovery: inspect pane ${paneId}, then write the final Crosby JSON result to ${resultPath} or rerun Crosby. ` +
+        `Recent transcript:\n${transcript.stdout}`,
+    );
+  }
+
+  return {
+    stdout,
+    stderr: await readFile(stderrPath, "utf8").catch(() => ""),
+    code: 0,
+    killed: false,
+  };
+}
+
 export default function crosbyExtension(pi: ExtensionAPI) {
   pi.registerCommand("crosby", {
     description:
       "Execute parent child-work, watch Execute parents, or explicitly push/review a parent PR",
     handler: async (args, ctx) => {
+      let dashboardController: ReturnType<
+        typeof createCrosbyDashboardController
+      > | null = null;
       try {
         const command = parseCrosbyCommandArgs(args);
 
@@ -834,8 +1204,15 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 moveIssue(pi, targetIssueKey, state),
               addComment: (targetIssueKey, body) =>
                 addIssueComment(pi, targetIssueKey, body),
-              runWorker: ({ prompt, cwd, model, effort }) =>
-                runIsolatedWorker(pi, prompt, { cwd, model, effort }),
+              runWorker: ({ prompt, cwd, model, effort, childIssueKey }) =>
+                runIsolatedWorker(pi, prompt, {
+                  cwd,
+                  model,
+                  effort,
+                  issueKey: childIssueKey,
+                  onHerdrWorkerStarted: (event) =>
+                    dashboardController?.herdrWorkerStarted(event),
+                }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
               refreshQueue: (parentIssueKey) =>
@@ -843,7 +1220,27 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                   loadIssueFromGitHub(pi, key),
                 ),
               loadIssue: (issueKey) => loadIssueFromGitHub(pi, issueKey),
+              onQueueLoaded: (queue) => {
+                if (!dashboardController) {
+                  dashboardController = createCrosbyDashboardController(
+                    ctx,
+                    queue,
+                    "watch",
+                  );
+                  return;
+                }
+
+                if (
+                  dashboardController.dashboard.parentIssueKey ===
+                  queue?.parent?.identifier
+                ) {
+                  dashboardController.queueRefreshed(queue);
+                } else {
+                  dashboardController.reset(queue, "watch");
+                }
+              },
               onExecutionStart: (event) => {
+                dashboardController?.executionStarted(event);
                 const pathText = formatIssuePath(event.path);
                 ctx.ui.notify(
                   `Crosby starting ${event.child?.identifier ?? "issue"}${pathText ? ` (${pathText})` : ""}.`,
@@ -858,12 +1255,19 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 });
               },
               onExecutionFinish: (event) => {
+                dashboardController?.executionFinished(event);
                 const pathText = formatIssuePath(event.path);
                 ctx.ui.notify(
                   `Crosby finished ${event.child?.identifier ?? "issue"}: ${event.workerResult?.outcome ?? "unknown"}.`,
                   event.workerResult?.outcome === "fatal" ? "error" : "success",
                 );
                 appendWorkerTranscript(pi, event);
+              },
+              onExecutionFinalized: (event) => {
+                dashboardController?.executionFinalized(event);
+              },
+              onQueueRefreshed: (queue) => {
+                dashboardController?.queueRefreshed(queue);
               },
             },
             {
@@ -888,6 +1292,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                   return;
                 }
                 if (cycle.status === "error") {
+                  dashboardController?.fatal(
+                    cycle.errorMessage ?? "Crosby watch mode cycle failed.",
+                  );
                   ctx.ui.notify(
                     cycle.errorMessage ?? "Crosby watch mode cycle failed.",
                     "error",
@@ -956,12 +1363,26 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           return;
         }
 
+        dashboardController = createCrosbyDashboardController(
+          ctx,
+          queue,
+          "manual",
+        );
+
         const execution = await runQueueExecution(queue, {
           moveIssue: (targetIssueKey, state) =>
             moveIssue(pi, targetIssueKey, state),
           addComment: (targetIssueKey, body) =>
             addIssueComment(pi, targetIssueKey, body),
-          runWorker: ({ prompt, cwd, model, effort }) => runIsolatedWorker(pi, prompt, { cwd, model, effort }),
+          runWorker: ({ prompt, cwd, model, effort, childIssueKey }) =>
+            runIsolatedWorker(pi, prompt, {
+              cwd,
+              model,
+              effort,
+              issueKey: childIssueKey,
+              onHerdrWorkerStarted: (event) =>
+                dashboardController?.herdrWorkerStarted(event),
+            }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
           refreshQueue: (parentIssueKey) =>
@@ -970,6 +1391,7 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             ),
           loadIssue: (issueKey) => loadIssueFromGitHub(pi, issueKey),
           onExecutionStart: (event) => {
+            dashboardController?.executionStarted(event);
             const pathText = formatIssuePath(event.path);
             ctx.ui.notify(
               `Crosby starting ${event.child?.identifier ?? "issue"}${pathText ? ` (${pathText})` : ""}.`,
@@ -984,12 +1406,19 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             });
           },
           onExecutionFinish: (event) => {
+            dashboardController?.executionFinished(event);
             const pathText = formatIssuePath(event.path);
             ctx.ui.notify(
               `Crosby finished ${event.child?.identifier ?? "issue"}: ${event.workerResult?.outcome ?? "unknown"}.`,
               event.workerResult?.outcome === "fatal" ? "error" : "success",
             );
             appendWorkerTranscript(pi, event);
+          },
+          onExecutionFinalized: (event) => {
+            dashboardController?.executionFinalized(event);
+          },
+          onQueueRefreshed: (refreshedQueue) => {
+            dashboardController?.queueRefreshed(refreshedQueue);
           },
         });
 
@@ -1032,6 +1461,7 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           lastExecution?.workerResult.outcome === "fatal" ? "error" : "success",
         );
       } catch (error) {
+        dashboardController?.fatal(error);
         ctx.ui.notify(
           error instanceof Error ? error.message : String(error),
           "error",

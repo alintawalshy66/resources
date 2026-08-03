@@ -143,6 +143,19 @@ export function extractEffortOverride(issue) {
   return extractLabelValue(issue, "effort:");
 }
 
+export function buildPiWorkerSessionName(issueKey) {
+  const raw = String(issueKey ?? "").trim();
+  const issueNumber = raw.match(/\d+/)?.[0];
+  if (issueNumber) return `gh-${issueNumber}`;
+
+  const slug = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return slug ? `crosby-${slug}` : "crosby-worker";
+}
+
 export function resolveIssueWorkingDirectory(issue, options = {}) {
   const documentsRoot = options.documentsRoot ?? DEFAULT_DOCUMENTS_ROOT;
   const projectsRoot =
@@ -1224,6 +1237,18 @@ export async function runSingleChildExecution(queue, operations) {
     await operations.moveIssue(child.identifier, "Review");
   }
 
+  if (typeof operations.onExecutionFinalized === "function") {
+    await operations.onExecutionFinalized({
+      parent: queue.parent,
+      child,
+      topLevelChild,
+      path,
+      cwd: routing?.cwd,
+      rawWorkerResult,
+      workerResult,
+    });
+  }
+
   return {
     child,
     topLevelChild,
@@ -1260,6 +1285,7 @@ export async function runQueueExecution(initialQueue, operations) {
       loadIssue: operations.loadIssue,
       onExecutionStart: operations.onExecutionStart,
       onExecutionFinish: operations.onExecutionFinish,
+      onExecutionFinalized: operations.onExecutionFinalized,
       ensureParentBranch: operations.ensureParentBranch,
       routing: operations.routing,
     });
@@ -1278,6 +1304,9 @@ export async function runQueueExecution(initialQueue, operations) {
 
     await reportChildOutcomeToParent(queue, execution, operations.addComment);
     queue = await operations.refreshQueue(queue.parent.identifier);
+    if (typeof operations.onQueueRefreshed === "function") {
+      await operations.onQueueRefreshed(queue);
+    }
     await finalizeParentIfComplete(queue, completedChildren, {
       addComment: operations.addComment,
       moveIssue: operations.moveIssue,
@@ -1339,6 +1368,10 @@ export async function runWatchCycle(operations) {
       }
     }
 
+    if (typeof operations.onQueueLoaded === "function") {
+      await operations.onQueueLoaded(queue);
+    }
+
     const execution = await runSingleChildExecution(queue, {
       moveIssue: operations.moveIssue,
       runWorker: operations.runWorker,
@@ -1346,6 +1379,7 @@ export async function runWatchCycle(operations) {
       loadIssue: operations.loadIssue,
       onExecutionStart: operations.onExecutionStart,
       onExecutionFinish: operations.onExecutionFinish,
+      onExecutionFinalized: operations.onExecutionFinalized,
       ensureParentBranch: operations.ensureParentBranch,
       routing: operations.routing,
     });
@@ -1366,6 +1400,9 @@ export async function runWatchCycle(operations) {
     const refreshedQueue = await operations.refreshQueue(
       queue.parent.identifier,
     );
+    if (typeof operations.onQueueRefreshed === "function") {
+      await operations.onQueueRefreshed(refreshedQueue);
+    }
     await finalizeParentIfComplete(refreshedQueue, [execution], operations);
 
     return {
