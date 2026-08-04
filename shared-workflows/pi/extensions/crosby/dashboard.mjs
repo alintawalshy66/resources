@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   classifyChildIssues,
   formatLifecycleFinishedEvent,
@@ -354,6 +357,33 @@ export function markDashboardPaneOpened(dashboard, event = {}) {
   dashboard.dashboardPaneId = event.paneId ?? dashboard.dashboardPaneId;
   touchDashboard(dashboard, event);
   return dashboard;
+}
+
+export function getCrosbyRunsRoot(options = {}) {
+  return options.runsRoot ?? path.join(os.homedir(), ".pi", "agent", "crosby", "runs");
+}
+
+export function getDashboardEventsPath(dashboard, options = {}) {
+  if (!dashboard?.runId) return null;
+  if (options.eventsPath) return options.eventsPath;
+  return path.join(getCrosbyRunsRoot(options), dashboard.runId, "events.jsonl");
+}
+
+/**
+ * Append the current dashboard state as one JSON line to the run's events.jsonl
+ * file so a separate terminal process (dashboard-runner.mjs) can tail it.
+ * Append-only, best-effort: persistence failures never interrupt dashboard updates.
+ */
+export function persistDashboardEvent(dashboard, options = {}) {
+  const eventsPath = getDashboardEventsPath(dashboard, options);
+  if (!eventsPath) return null;
+  try {
+    fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
+    fs.appendFileSync(eventsPath, `${JSON.stringify(dashboard)}\n`, { flag: "a" });
+  } catch {
+    // Persistence is best-effort and must never stop Crosby execution.
+  }
+  return eventsPath;
 }
 
 function formatElapsed(startedAt, finishedAt) {

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createCrosbyDashboard,
   markDashboardExecutionFinalized,
@@ -11,6 +12,7 @@ import {
   markDashboardFatalError,
   markDashboardHerdrWorkerStarted,
   markDashboardPaneOpened,
+  persistDashboardEvent,
   reconcileDashboardFromQueue,
   renderCrosbyCompactDashboard,
   renderCrosbyDashboard,
@@ -61,6 +63,7 @@ function updateCrosbyDashboardWidget(ctx: any, dashboard: any) {
 function createCrosbyDashboardController(ctx: any, queue: any, mode: string) {
   let dashboard = createCrosbyDashboard(queue, { mode });
   updateCrosbyDashboardWidget(ctx, dashboard);
+  persistDashboardEvent(dashboard);
 
   return {
     get dashboard() {
@@ -69,35 +72,43 @@ function createCrosbyDashboardController(ctx: any, queue: any, mode: string) {
     reset(nextQueue: any, nextMode = mode) {
       dashboard = createCrosbyDashboard(nextQueue, { mode: nextMode });
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
       return dashboard;
     },
     executionStarted(event: any) {
       markDashboardExecutionStarted(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     herdrWorkerStarted(event: any) {
       markDashboardHerdrWorkerStarted(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     dashboardPaneOpened(event: any) {
       markDashboardPaneOpened(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     executionFinished(event: any) {
       markDashboardExecutionFinished(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     executionFinalized(event: any) {
       markDashboardExecutionFinalized(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     queueRefreshed(queue: any) {
       reconcileDashboardFromQueue(dashboard, queue);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     fatal(error: unknown) {
       markDashboardFatalError(dashboard, error);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
   };
 }
@@ -861,6 +872,87 @@ function getHerdrInvocation(args: string[]) {
   return { command: configured || "herdr", args };
 }
 
+function getNodeInvocation(args: string[]) {
+  const configured = process.env.NODE_BIN?.trim();
+  return { command: configured || "node", args };
+}
+
+function isInsideHerdr() {
+  return process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
+}
+
+function shouldOpenCrosbyDashboardPane() {
+  const setting = String(process.env.CROSBY_DASHBOARD_PANE ?? "")
+    .trim()
+    .toLowerCase();
+  if (["0", "false", "no", "off"].includes(setting)) return false;
+  return isInsideHerdr();
+}
+
+function getDashboardRunnerScriptPath() {
+  return path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "dashboard-runner.mjs",
+  );
+}
+
+async function openCrosbyDashboardPane(
+  pi: ExtensionAPI,
+  dashboardController: ReturnType<
+    typeof createCrosbyDashboardController
+  > | null,
+) {
+  if (!dashboardController) return;
+  if (dashboardController.dashboard.dashboardPaneId) return;
+  if (!shouldOpenCrosbyDashboardPane()) return;
+
+  try {
+    const opened = await execHerdr(
+      pi,
+      [
+        "pane",
+        "split",
+        process.env.HERDR_PANE_ID!,
+        "--direction",
+        "right",
+        "--no-focus",
+      ],
+      "Failed to open Herdr dashboard pane for Crosby",
+    );
+    const paneId = parseHerdrPaneId(opened.stdout);
+    if (!paneId) return;
+
+    await execHerdr(
+      pi,
+      ["pane", "rename", paneId, "Crosby dashboard"],
+      "Failed to label Herdr dashboard pane for Crosby",
+    ).catch(() => {
+      // Pane labeling is best-effort; keep the dashboard pane running even if rename fails.
+    });
+
+    const nodeInvocation = getNodeInvocation([
+      getDashboardRunnerScriptPath(),
+      "--run",
+      dashboardController.dashboard.runId,
+    ]);
+    await execHerdr(
+      pi,
+      [
+        "pane",
+        "run",
+        paneId,
+        nodeInvocation.command,
+        ...nodeInvocation.args,
+      ],
+      "Failed to start Crosby dashboard runner in Herdr pane",
+    );
+
+    dashboardController.dashboardPaneOpened({ paneId });
+  } catch {
+    // Dashboard pane creation is best-effort and must never stop Crosby execution.
+  }
+}
+
 function shouldRunWorkersInHerdrPanes() {
   const setting = String(process.env.CROSBY_HERDR_PANES ?? "")
     .trim()
@@ -1240,6 +1332,7 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                     queue,
                     "watch",
                   );
+                  void openCrosbyDashboardPane(pi, dashboardController);
                   return;
                 }
 
@@ -1250,6 +1343,7 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                   dashboardController.queueRefreshed(queue);
                 } else {
                   dashboardController.reset(queue, "watch");
+                  void openCrosbyDashboardPane(pi, dashboardController);
                 }
               },
               onExecutionStart: (event) => {
@@ -1381,6 +1475,7 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           queue,
           "manual",
         );
+        await openCrosbyDashboardPane(pi, dashboardController);
 
         const execution = await runQueueExecution(queue, {
           moveIssue: (targetIssueKey, state) =>
