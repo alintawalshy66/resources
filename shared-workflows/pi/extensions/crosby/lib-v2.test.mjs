@@ -1,15 +1,41 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildPiWorkerSessionName,
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
+  formatLifecycleFinishedEvent,
+  formatLifecycleStartedEvent,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
   reviewParentPullRequest,
+  runQueueExecution,
   runWatchCycle,
   runWatchMode,
 } from "./lib-v2.mjs";
+
+test("formatLifecycleStartedEvent and formatLifecycleFinishedEvent normalize worker lifecycle updates into short events", () => {
+  assert.equal(formatLifecycleStartedEvent("#135"), "#135 started");
+  assert.equal(
+    formatLifecycleStartedEvent({ identifier: "#135" }),
+    "#135 started",
+  );
+  assert.equal(formatLifecycleFinishedEvent("#135", "done"), "#135 finished done");
+  assert.equal(formatLifecycleFinishedEvent("#136", "review"), "#136 finished review");
+  assert.equal(formatLifecycleFinishedEvent("#137", "fatal"), "#137 fatal");
+});
+
+test("buildPiWorkerSessionName names Pi sessions from GitHub issue numbers", () => {
+  assert.equal(buildPiWorkerSessionName("#123"), "gh-123");
+  assert.equal(buildPiWorkerSessionName(456), "gh-456");
+  assert.equal(
+    buildPiWorkerSessionName("https://github.com/example/repo/issues/789"),
+    "gh-789",
+  );
+  assert.equal(buildPiWorkerSessionName("manual worker"), "crosby-manual-worker");
+  assert.equal(buildPiWorkerSessionName(null), "crosby-worker");
+});
 
 test("runWatchCycle keeps fatal worker issues in Build and does not move them to review", async () => {
   const moved = [];
@@ -155,6 +181,87 @@ test("runWatchMode continues polling after a fatal worker result", async () => {
     ["#136", "Building"],
     ["#136", "Done"],
     ["#129", "Review"],
+  ]);
+});
+
+test("runQueueExecution emits finalized and refreshed callbacks after each child result", async () => {
+  const calls = [];
+  let refreshed = false;
+
+  const result = await runQueueExecution(
+    {
+      parent: {
+        identifier: "#129",
+        title: "Symphony",
+        state: { name: "Execute", type: "started" },
+      },
+      children: [
+        {
+          identifier: "#135",
+          title: "Implement dashboard",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    {
+      moveIssue: async (issueKey, state) => calls.push(["moveIssue", issueKey, state]),
+      addComment: async (issueKey) => calls.push(["addComment", issueKey]),
+      runWorker: async () => ({
+        stdout: JSON.stringify({
+          issueKey: "#135",
+          issueTitle: "Implement dashboard",
+          outcome: "done",
+          summary: "Completed.",
+          changes: ["Added dashboard"],
+          tests: ["node --test"],
+        }),
+      }),
+      refreshQueue: async () => {
+        calls.push(["refreshQueue"]);
+        refreshed = true;
+        return {
+          parent: {
+            identifier: "#129",
+            title: "Symphony",
+            state: { name: "Building", type: "started" },
+          },
+          children: [
+            {
+              identifier: "#135",
+              title: "Implement dashboard",
+              state: { name: "Done", type: "completed" },
+            },
+          ],
+        };
+      },
+      onExecutionFinalized: async (event) => {
+        calls.push([
+          "finalized",
+          event.child.identifier,
+          event.workerResult.outcome,
+          refreshed,
+        ]);
+      },
+      onQueueRefreshed: async (queue) => {
+        calls.push([
+          "queueRefreshed",
+          queue.parent.identifier,
+          queue.children[0].state.name,
+        ]);
+      },
+    },
+  );
+
+  assert.equal(result.completedChildren.length, 1);
+  assert.deepEqual(calls, [
+    ["moveIssue", "#135", "Building"],
+    ["moveIssue", "#135", "Done"],
+    ["finalized", "#135", "done", false],
+    ["addComment", "#129"],
+    ["refreshQueue"],
+    ["queueRefreshed", "#129", "Done"],
+    ["addComment", "#129"],
+    ["moveIssue", "#129", "Review"],
   ]);
 });
 

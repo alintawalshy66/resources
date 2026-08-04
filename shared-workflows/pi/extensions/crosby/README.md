@@ -46,6 +46,9 @@ It uses:
 
 - **Pi build worker** for child implementation
   - model is inherited from normal Pi resolution/config
+  - the Crosby control tab renders a live dashboard of parent child issues, including queued/in-progress/done/review/fatal state and worker pane IDs when available
+  - when Crosby itself is running inside Herdr, each build worker starts as an interactive Pi agent in its own Herdr tab by default so progress/tool calls are visible while watch/manual execution loops
+  - when Crosby itself is running inside Herdr, a sibling dashboard pane opens in the same tab by default for both `/crosby #parent` and `/crosby --watch`, running the standalone dashboard runner against the current run's event log; the compact widget shows the dashboard pane ID once it is open
 - **Claude review worker** for explicit PR review
   - default model: `claude-sonnet-4-6`
   - default effort: `medium`
@@ -140,7 +143,7 @@ What happens:
 3. Picks the next unblocked child with `status:ready-to-build`.
 4. Ensures the repo is on the parent feature branch.
 5. Moves that child to `status:building`.
-6. Runs the Pi worker.
+6. Runs the Pi worker with a persistent session named from the child issue number (for example `gh-135`) so it is easy to find later with `pi -r` / `/resume`.
 7. Moves the child to:
    - closed if complete
    - `status:review` if human review/action is needed
@@ -161,7 +164,7 @@ Current behavior:
 - picks the next unblocked child with `status:ready-to-build`
 - ensures the repo is on the parent feature branch
 - moves that child to `status:building`
-- runs the Pi worker
+- runs the Pi worker with a persistent `gh-<issue-number>` session name for resume lookup
 - posts progress back to the parent
 - when all child issues are closed, posts the final summary and moves the parent to `status:review`
 
@@ -231,15 +234,108 @@ GitHub PR work is explicit:
 6. posts the review result to the PR
 7. posts the review summary back to the parent GitHub issue
 
+## Dashboard
+
+Crosby projects run state in two places: a compact widget always visible in the Pi UI,
+and an optional full dashboard pane opened in Herdr.
+
+### Compact widget vs. full dashboard pane
+
+- **Compact widget**: a small `ctx.ui.setWidget` panel rendered inside the running Pi process
+  (Crosby control tab). It never shows the full task list. It shows:
+  ```text
+  Crosby #129: <parent title>
+  Last: <one-line lifecycle event>
+  Dashboard: pane <pane-id>
+  ```
+  The `Dashboard:` line only appears once a dashboard pane has actually been opened.
+- **Full dashboard pane**: a separate terminal pane running the standalone
+  `dashboard-runner.mjs` script. It renders the full parent/child task list, per-task
+  status (queued/in-progress/done/review/fatal), and the recent event history using the
+  same `renderCrosbyDashboard` reducer that produces the pane content. Because it is a
+  plain Node process, it never starts a Pi model or session and keeps running/tailing
+  even if the Crosby control tab's Pi process exits.
+
+### Herdr dashboard pane behavior
+
+When Crosby is running inside Herdr, both `/crosby #129` (manual) and `/crosby --watch`
+open one dashboard pane per run as a sibling pane in the **same Herdr tab** as the Crosby
+control process (`pane split --direction right`). The pane is labeled `Crosby dashboard`
+and runs `dashboard-runner.mjs --run <run-id>`, pointed at the current run's event log, so
+it reprints as new lifecycle events are appended.
+
+Dashboard pane creation is best-effort: if the Herdr split, label, or runner launch fails,
+Crosby logs it internally but never stops or fails the run.
+
+### Event log location
+
+Every dashboard mutation (run started/idle, task started/finished/review/fatal, run
+completed/fatal, dashboard pane opened) is appended as one JSON line to:
+
+```text
+~/.pi/agent/crosby/runs/<run-id>/events.jsonl
+```
+
+Writes are append-only (`fs.appendFileSync`), so the file is safe to `tail -f` from any
+other terminal, independent of the dashboard pane or dashboard runner.
+
+### Default-on behavior inside Herdr
+
+- Inside Herdr (`HERDR_ENV=1` and a resolvable `HERDR_PANE_ID`): the dashboard pane opens
+  automatically for both manual and watch execution — no flag is required to opt in.
+- Outside Herdr: Crosby never attempts to open a dashboard pane. Compact widget and
+  event log behavior are unaffected; only the separate terminal pane is skipped.
+
+### Disabling the dashboard pane
+
+Set:
+
+```text
+CROSBY_DASHBOARD_PANE=0
+```
+
+to opt out of automatic dashboard pane creation while still running inside Herdr. This
+only disables the dashboard pane; it does not affect build worker panes/tabs
+(`CROSBY_HERDR_PANES`) or the compact widget/event log.
+
+### Troubleshooting: missing dashboard pane
+
+If no dashboard pane appears when running inside Herdr:
+
+- Confirm `CROSBY_DASHBOARD_PANE` is not set to `0`, `false`, `no`, or `off`.
+- Confirm Crosby detects Herdr: both `HERDR_ENV=1` and `HERDR_PANE_ID` must be set in the
+  environment the Pi process is running in.
+- Dashboard pane creation is best-effort — a failed `herdr pane split`/`rename`/`run` call
+  is swallowed so it never blocks execution. Check for a stray unlabeled pane in the same
+  tab, or run `dashboard-runner.mjs` manually against the run directory to confirm the
+  event log itself is healthy.
+- Run the dashboard manually against the most recent run without waiting for Crosby to
+  reopen a pane:
+  ```bash
+  node shared-workflows/pi/extensions/crosby/dashboard-runner.mjs --once
+  ```
+  or point it at a specific run:
+  ```bash
+  node shared-workflows/pi/extensions/crosby/dashboard-runner.mjs --run <run-id>
+  ```
+- If `~/.pi/agent/crosby/runs/<run-id>/events.jsonl` is missing or empty, the run never
+  reached its first dashboard mutation (e.g. it failed before `run_started`); check Crosby's
+  own output/logs rather than the dashboard pane.
+
 ## Config overrides
 
 Optional environment variables:
 
 - `CROSBY_CLAUDE_MODEL`
 - `CROSBY_CLAUDE_EFFORT`
+- `CROSBY_HERDR_PANES=0` disables automatic Herdr worker terminals when Crosby is running inside Herdr
+- `CROSBY_HERDR_LAYOUT=tab|pane` chooses worker display layout when running inside Herdr; default is `tab`
+- `CROSBY_DASHBOARD_PANE=0` disables the automatic Herdr dashboard pane; the dashboard pane is otherwise opened by default whenever Crosby is running inside Herdr, and never opened outside Herdr
 - `GH_BIN`
 - `GIT_BIN`
 - `CLAUDE_BIN`
+- `HERDR_BIN`
+- `NODE_BIN`
 
 Pi build workers inherit model selection from normal Pi config/session resolution.
 
@@ -253,3 +349,7 @@ Defaults:
 - `index.ts` - Pi extension entrypoint and GitHub CLI adapter
 - `lib-v2.mjs` - Crosby queue/execution logic
 - `lib-v2.test.mjs` - Node test coverage
+- `dashboard.mjs` - dashboard/compact widget state model, event persistence, and rendering
+- `dashboard.test.mjs` - Node test coverage for the dashboard model
+- `dashboard-runner.mjs` - standalone terminal renderer for the full dashboard pane
+- `dashboard-runner.test.mjs` - Node test coverage for the dashboard runner
