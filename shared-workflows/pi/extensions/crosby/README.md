@@ -48,6 +48,7 @@ It uses:
   - model is inherited from normal Pi resolution/config
   - the Crosby control tab renders a live dashboard of parent child issues, including queued/in-progress/done/review/fatal state and worker pane IDs when available
   - when Crosby itself is running inside Herdr, each build worker starts as an interactive Pi agent in its own Herdr tab by default so progress/tool calls are visible while watch/manual execution loops
+  - when Crosby itself is running inside Herdr, a sibling dashboard pane opens in the same tab by default for both `/crosby #parent` and `/crosby --watch`, running the standalone dashboard runner against the current run's event log; the compact widget shows the dashboard pane ID once it is open
 - **Claude review worker** for explicit PR review
   - default model: `claude-sonnet-4-6`
   - default effort: `medium`
@@ -241,10 +242,12 @@ Optional environment variables:
 - `CROSBY_CLAUDE_EFFORT`
 - `CROSBY_HERDR_PANES=0` disables automatic Herdr worker terminals when Crosby is running inside Herdr
 - `CROSBY_HERDR_LAYOUT=tab|pane` chooses worker display layout when running inside Herdr; default is `tab`
+- `CROSBY_DASHBOARD_PANE=0` disables the automatic Herdr dashboard pane; the dashboard pane is otherwise opened by default whenever Crosby is running inside Herdr, and never opened outside Herdr
 - `GH_BIN`
 - `GIT_BIN`
 - `CLAUDE_BIN`
 - `HERDR_BIN`
+- `NODE_BIN`
 
 Pi build workers inherit model selection from normal Pi config/session resolution.
 
