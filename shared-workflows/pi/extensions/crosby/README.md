@@ -234,6 +234,94 @@ GitHub PR work is explicit:
 6. posts the review result to the PR
 7. posts the review summary back to the parent GitHub issue
 
+## Dashboard
+
+Crosby projects run state in two places: a compact widget always visible in the Pi UI,
+and an optional full dashboard pane opened in Herdr.
+
+### Compact widget vs. full dashboard pane
+
+- **Compact widget**: a small `ctx.ui.setWidget` panel rendered inside the running Pi process
+  (Crosby control tab). It never shows the full task list. It shows:
+  ```text
+  Crosby #129: <parent title>
+  Last: <one-line lifecycle event>
+  Dashboard: pane <pane-id>
+  ```
+  The `Dashboard:` line only appears once a dashboard pane has actually been opened.
+- **Full dashboard pane**: a separate terminal pane running the standalone
+  `dashboard-runner.mjs` script. It renders the full parent/child task list, per-task
+  status (queued/in-progress/done/review/fatal), and the recent event history using the
+  same `renderCrosbyDashboard` reducer that produces the pane content. Because it is a
+  plain Node process, it never starts a Pi model or session and keeps running/tailing
+  even if the Crosby control tab's Pi process exits.
+
+### Herdr dashboard pane behavior
+
+When Crosby is running inside Herdr, both `/crosby #129` (manual) and `/crosby --watch`
+open one dashboard pane per run as a sibling pane in the **same Herdr tab** as the Crosby
+control process (`pane split --direction right`). The pane is labeled `Crosby dashboard`
+and runs `dashboard-runner.mjs --run <run-id>`, pointed at the current run's event log, so
+it reprints as new lifecycle events are appended.
+
+Dashboard pane creation is best-effort: if the Herdr split, label, or runner launch fails,
+Crosby logs it internally but never stops or fails the run.
+
+### Event log location
+
+Every dashboard mutation (run started/idle, task started/finished/review/fatal, run
+completed/fatal, dashboard pane opened) is appended as one JSON line to:
+
+```text
+~/.pi/agent/crosby/runs/<run-id>/events.jsonl
+```
+
+Writes are append-only (`fs.appendFileSync`), so the file is safe to `tail -f` from any
+other terminal, independent of the dashboard pane or dashboard runner.
+
+### Default-on behavior inside Herdr
+
+- Inside Herdr (`HERDR_ENV=1` and a resolvable `HERDR_PANE_ID`): the dashboard pane opens
+  automatically for both manual and watch execution — no flag is required to opt in.
+- Outside Herdr: Crosby never attempts to open a dashboard pane. Compact widget and
+  event log behavior are unaffected; only the separate terminal pane is skipped.
+
+### Disabling the dashboard pane
+
+Set:
+
+```text
+CROSBY_DASHBOARD_PANE=0
+```
+
+to opt out of automatic dashboard pane creation while still running inside Herdr. This
+only disables the dashboard pane; it does not affect build worker panes/tabs
+(`CROSBY_HERDR_PANES`) or the compact widget/event log.
+
+### Troubleshooting: missing dashboard pane
+
+If no dashboard pane appears when running inside Herdr:
+
+- Confirm `CROSBY_DASHBOARD_PANE` is not set to `0`, `false`, `no`, or `off`.
+- Confirm Crosby detects Herdr: both `HERDR_ENV=1` and `HERDR_PANE_ID` must be set in the
+  environment the Pi process is running in.
+- Dashboard pane creation is best-effort — a failed `herdr pane split`/`rename`/`run` call
+  is swallowed so it never blocks execution. Check for a stray unlabeled pane in the same
+  tab, or run `dashboard-runner.mjs` manually against the run directory to confirm the
+  event log itself is healthy.
+- Run the dashboard manually against the most recent run without waiting for Crosby to
+  reopen a pane:
+  ```bash
+  node shared-workflows/pi/extensions/crosby/dashboard-runner.mjs --once
+  ```
+  or point it at a specific run:
+  ```bash
+  node shared-workflows/pi/extensions/crosby/dashboard-runner.mjs --run <run-id>
+  ```
+- If `~/.pi/agent/crosby/runs/<run-id>/events.jsonl` is missing or empty, the run never
+  reached its first dashboard mutation (e.g. it failed before `run_started`); check Crosby's
+  own output/logs rather than the dashboard pane.
+
 ## Config overrides
 
 Optional environment variables:
@@ -261,3 +349,7 @@ Defaults:
 - `index.ts` - Pi extension entrypoint and GitHub CLI adapter
 - `lib-v2.mjs` - Crosby queue/execution logic
 - `lib-v2.test.mjs` - Node test coverage
+- `dashboard.mjs` - dashboard/compact widget state model, event persistence, and rendering
+- `dashboard.test.mjs` - Node test coverage for the dashboard model
+- `dashboard-runner.mjs` - standalone terminal renderer for the full dashboard pane
+- `dashboard-runner.test.mjs` - Node test coverage for the dashboard runner
