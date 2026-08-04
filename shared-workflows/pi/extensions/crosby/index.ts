@@ -10,7 +10,9 @@ import {
   markDashboardExecutionStarted,
   markDashboardFatalError,
   markDashboardHerdrWorkerStarted,
+  markDashboardPaneOpened,
   reconcileDashboardFromQueue,
+  renderCrosbyCompactDashboard,
   renderCrosbyDashboard,
 } from "./dashboard.mjs";
 import {
@@ -41,9 +43,16 @@ const DEFAULT_CROSBY_CLAUDE_EFFORT =
 function updateCrosbyDashboardWidget(ctx: any, dashboard: any) {
   if (!dashboard || typeof ctx?.ui?.setWidget !== "function") return;
   try {
-    ctx.ui.setWidget("crosby-dashboard", renderCrosbyDashboard(dashboard), {
-      placement: "aboveEditor",
-    });
+    ctx.ui.setWidget(
+      "crosby-dashboard",
+      renderCrosbyCompactDashboard(dashboard),
+      { placement: "aboveEditor" },
+    );
+    ctx.ui.setWidget(
+      "crosby-dashboard-pane",
+      renderCrosbyDashboard(dashboard),
+      { placement: "aboveEditor" },
+    );
   } catch {
     // Dashboard rendering is best-effort and should never stop Crosby execution.
   }
@@ -68,6 +77,10 @@ function createCrosbyDashboardController(ctx: any, queue: any, mode: string) {
     },
     herdrWorkerStarted(event: any) {
       markDashboardHerdrWorkerStarted(dashboard, event);
+      updateCrosbyDashboardWidget(ctx, dashboard);
+    },
+    dashboardPaneOpened(event: any) {
+      markDashboardPaneOpened(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
     },
     executionFinished(event: any) {

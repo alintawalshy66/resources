@@ -57,6 +57,21 @@ export function parseCrosbyCommandArgs(args) {
   );
 }
 
+export function getIssueIdentifier(issueOrKey) {
+  if (typeof issueOrKey === "string") return issueOrKey;
+  return String(issueOrKey?.identifier ?? issueOrKey?.number ?? "").trim();
+}
+
+export function formatLifecycleStartedEvent(issueOrKey) {
+  return `${getIssueIdentifier(issueOrKey)} started`;
+}
+
+export function formatLifecycleFinishedEvent(issueOrKey, outcome) {
+  const identifier = getIssueIdentifier(issueOrKey);
+  if (outcome === "fatal") return `${identifier} fatal`;
+  return `${identifier} finished ${outcome}`;
+}
+
 export function loadParentQueueFromIssue(issue) {
   const children = Array.isArray(issue?.children) ? issue.children : [];
 

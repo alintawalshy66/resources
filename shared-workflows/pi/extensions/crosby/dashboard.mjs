@@ -1,4 +1,8 @@
-import { classifyChildIssues } from "./lib-v2.mjs";
+import {
+  classifyChildIssues,
+  formatLifecycleFinishedEvent,
+  formatLifecycleStartedEvent,
+} from "./lib-v2.mjs";
 
 const STATUS_ICONS = {
   queued: "☐",
@@ -147,6 +151,19 @@ function touchDashboard(dashboard, options = {}) {
   dashboard.updatedAt = nowISOString(options);
 }
 
+const EVENT_LOG_LIMIT = 50;
+
+function pushLifecycleEvent(dashboard, message, options = {}) {
+  if (!message) return;
+  if (dashboard.lastEvent?.message === message) return;
+  const entry = { message, timestamp: nowISOString(options) };
+  dashboard.events.push(entry);
+  if (dashboard.events.length > EVENT_LOG_LIMIT) {
+    dashboard.events.splice(0, dashboard.events.length - EVENT_LOG_LIMIT);
+  }
+  dashboard.lastEvent = entry;
+}
+
 export function createCrosbyDashboard(queue, options = {}) {
   const children = Array.isArray(queue?.children) ? queue.children : [];
   const reasonByIssue = buildReasonByIssue(children);
@@ -164,6 +181,9 @@ export function createCrosbyDashboard(queue, options = {}) {
     startedAt: timestamp,
     updatedAt: timestamp,
     fatalError: null,
+    events: [],
+    lastEvent: null,
+    dashboardPaneId: options.dashboardPaneId ?? null,
   };
 }
 
@@ -225,6 +245,9 @@ export function markDashboardExecutionStarted(dashboard, event = {}) {
   }
 
   dashboard.currentIssueKey = childKey || topLevelKey || dashboard.currentIssueKey;
+  if (childKey) {
+    pushLifecycleEvent(dashboard, formatLifecycleStartedEvent(childKey), event);
+  }
   touchDashboard(dashboard, event);
   return dashboard;
 }
@@ -280,8 +303,15 @@ export function markDashboardExecutionFinalized(dashboard, event = {}) {
     task.status = status;
     task.outcome = outcome ?? status;
     task.summary = event.workerResult?.summary ?? task.summary;
+    task.requiredHumanAction =
+      event.workerResult?.requiredHumanAction ?? task.requiredHumanAction ?? null;
+    task.recoveryNotes = event.workerResult?.recoveryNotes ?? task.recoveryNotes ?? null;
     task.finishedAt = timestamp;
     task.updatedAt = timestamp;
+  }
+
+  if (issueKey && outcome) {
+    pushLifecycleEvent(dashboard, formatLifecycleFinishedEvent(issueKey, outcome), event);
   }
 
   if (status === "fatal") {
@@ -316,6 +346,13 @@ export function markDashboardFatalError(dashboard, error, options = {}) {
   }
 
   touchDashboard(dashboard, options);
+  return dashboard;
+}
+
+export function markDashboardPaneOpened(dashboard, event = {}) {
+  if (!dashboard) return dashboard;
+  dashboard.dashboardPaneId = event.paneId ?? dashboard.dashboardPaneId;
+  touchDashboard(dashboard, event);
   return dashboard;
 }
 
@@ -423,5 +460,28 @@ export function renderCrosbyDashboard(dashboard) {
   }
 
   lines.push("", ...renderPrioritizedTasks(dashboard.tasks));
+
+  const events = Array.isArray(dashboard.events) ? dashboard.events : [];
+  if (events.length > 0) {
+    lines.push("", "Event log:", ...events.map((entry) => `- ${entry.message}`));
+  }
+
+  return lines;
+}
+
+export function renderCrosbyCompactDashboard(dashboard) {
+  if (!dashboard) return [];
+  const stateLine = `Crosby ${dashboard.parentIssueKey}: ${dashboard.parentTitle}`;
+  const lastLine = dashboard.lastEvent
+    ? `Last: ${dashboard.lastEvent.message}`
+    : "Last: (no events yet)";
+  const paneLine = dashboard.dashboardPaneId
+    ? `Dashboard: pane ${dashboard.dashboardPaneId}`
+    : "Dashboard: pane not open";
+
+  const lines = [stateLine, lastLine, paneLine];
+  if (dashboard.fatalError) {
+    lines.push(`Error: ${dashboard.fatalError}`);
+  }
   return lines;
 }

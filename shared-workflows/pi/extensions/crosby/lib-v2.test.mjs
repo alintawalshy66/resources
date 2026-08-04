@@ -5,6 +5,8 @@ import {
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
+  formatLifecycleFinishedEvent,
+  formatLifecycleStartedEvent,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -12,6 +14,17 @@ import {
   runWatchCycle,
   runWatchMode,
 } from "./lib-v2.mjs";
+
+test("formatLifecycleStartedEvent and formatLifecycleFinishedEvent normalize worker lifecycle updates into short events", () => {
+  assert.equal(formatLifecycleStartedEvent("#135"), "#135 started");
+  assert.equal(
+    formatLifecycleStartedEvent({ identifier: "#135" }),
+    "#135 started",
+  );
+  assert.equal(formatLifecycleFinishedEvent("#135", "done"), "#135 finished done");
+  assert.equal(formatLifecycleFinishedEvent("#136", "review"), "#136 finished review");
+  assert.equal(formatLifecycleFinishedEvent("#137", "fatal"), "#137 fatal");
+});
 
 test("buildPiWorkerSessionName names Pi sessions from GitHub issue numbers", () => {
   assert.equal(buildPiWorkerSessionName("#123"), "gh-123");

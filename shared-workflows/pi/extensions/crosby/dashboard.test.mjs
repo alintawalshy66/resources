@@ -6,7 +6,9 @@ import {
   markDashboardExecutionStarted,
   markDashboardFatalError,
   markDashboardHerdrWorkerStarted,
+  markDashboardPaneOpened,
   reconcileDashboardFromQueue,
+  renderCrosbyCompactDashboard,
   renderCrosbyDashboard,
 } from "./dashboard.mjs";
 
@@ -169,4 +171,157 @@ test("Crosby dashboard marks current task and run fatal on command errors", () =
   const rendered = renderCrosbyDashboard(dashboard).join("\n");
   assert.match(rendered, /❌ #130 First task/);
   assert.match(rendered, /Error: Worker exploded/);
+});
+
+test("Crosby dashboard records normalized one-line lifecycle events for started and finished outcomes", () => {
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#135",
+          title: "Failure handling",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+        {
+          identifier: "#136",
+          title: "Review candidate",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+        {
+          identifier: "#137",
+          title: "Fatal candidate",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "manual", runId: "test-run", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  markDashboardExecutionStarted(dashboard, {
+    child: { identifier: "#135", title: "Failure handling" },
+    now: () => "2026-08-02T00:00:01.000Z",
+  });
+  assert.equal(dashboard.lastEvent.message, "#135 started");
+
+  markDashboardExecutionFinalized(dashboard, {
+    child: { identifier: "#135", title: "Failure handling" },
+    workerResult: { outcome: "done", summary: "Finished." },
+    now: () => "2026-08-02T00:00:02.000Z",
+  });
+  assert.equal(dashboard.lastEvent.message, "#135 finished done");
+
+  markDashboardExecutionFinalized(dashboard, {
+    child: { identifier: "#136", title: "Review candidate" },
+    workerResult: {
+      outcome: "review",
+      summary: "Needs human review.",
+      requiredHumanAction: "Check the diff.",
+      recoveryNotes: ["Inspect the branch."],
+    },
+    now: () => "2026-08-02T00:00:03.000Z",
+  });
+  assert.equal(dashboard.lastEvent.message, "#136 finished review");
+
+  markDashboardExecutionFinalized(dashboard, {
+    child: { identifier: "#137", title: "Fatal candidate" },
+    workerResult: {
+      outcome: "fatal",
+      summary: "Worker crashed.",
+      requiredHumanAction: "Restart worker.",
+      recoveryNotes: ["Check logs."],
+    },
+    now: () => "2026-08-02T00:00:04.000Z",
+  });
+  assert.equal(dashboard.lastEvent.message, "#137 fatal");
+
+  assert.deepEqual(
+    dashboard.events.map((entry) => entry.message),
+    [
+      "#135 started",
+      "#135 finished done",
+      "#136 finished review",
+      "#137 fatal",
+    ],
+  );
+
+  const reviewTask = dashboard.tasks.find((task) => task.issueKey === "#136");
+  assert.equal(reviewTask.requiredHumanAction, "Check the diff.");
+  assert.deepEqual(reviewTask.recoveryNotes, ["Inspect the branch."]);
+
+  const fatalTask = dashboard.tasks.find((task) => task.issueKey === "#137");
+  assert.equal(fatalTask.requiredHumanAction, "Restart worker.");
+  assert.deepEqual(fatalTask.recoveryNotes, ["Check logs."]);
+
+  const rendered = renderCrosbyDashboard(dashboard).join("\n");
+  assert.match(rendered, /Event log:/);
+  assert.match(rendered, /- #135 started/);
+  assert.match(rendered, /- #137 fatal/);
+});
+
+test("Crosby dashboard deduplicates a repeated finalized event for the same outcome", () => {
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#137",
+          title: "Fatal candidate",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "manual", runId: "test-run", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  const event = {
+    child: { identifier: "#137", title: "Fatal candidate" },
+    workerResult: { outcome: "fatal", summary: "Worker crashed." },
+    now: () => "2026-08-02T00:00:01.000Z",
+  };
+
+  markDashboardExecutionFinalized(dashboard, event);
+  markDashboardExecutionFinalized(dashboard, event);
+
+  assert.equal(dashboard.events.length, 1);
+  assert.equal(dashboard.events[0].message, "#137 fatal");
+});
+
+test("Crosby compact dashboard shows only parent state, last event, and dashboard pane", () => {
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#135",
+          title: "Failure handling",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "manual", runId: "test-run", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  const before = renderCrosbyCompactDashboard(dashboard);
+  assert.deepEqual(before, [
+    "Crosby #129: Parent feature",
+    "Last: (no events yet)",
+    "Dashboard: pane not open",
+  ]);
+
+  markDashboardExecutionStarted(dashboard, {
+    child: { identifier: "#135", title: "Failure handling" },
+    now: () => "2026-08-02T00:00:01.000Z",
+  });
+  markDashboardPaneOpened(dashboard, {
+    paneId: "pane-42",
+    now: () => "2026-08-02T00:00:02.000Z",
+  });
+
+  const after = renderCrosbyCompactDashboard(dashboard);
+  assert.deepEqual(after, [
+    "Crosby #129: Parent feature",
+    "Last: #135 started",
+    "Dashboard: pane pane-42",
+  ]);
 });
