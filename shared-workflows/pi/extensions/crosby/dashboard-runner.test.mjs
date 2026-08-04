@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { createCrosbyDashboard, persistDashboardEvent } from "./dashboard.mjs";
 import {
   parseDashboardRunnerArgs,
@@ -12,6 +14,10 @@ import {
   runDashboardRunner,
   watchDashboardEventsPath,
 } from "./dashboard-runner.mjs";
+
+const RUNNER_SCRIPT_PATH = fileURLToPath(
+  new URL("./dashboard-runner.mjs", import.meta.url),
+);
 
 function makeTempRunsRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "crosby-runner-test-"));
@@ -180,4 +186,44 @@ test("runDashboardRunner reports when no Crosby run exists", async () => {
 
   assert.equal(result.eventsPath, null);
   assert.match(writes[0], /No Crosby run found/);
+});
+
+test("CLI watch mode stays alive and reprints on appended events instead of exiting after the first render", async () => {
+  const runsRoot = makeTempRunsRoot();
+  const dashboard = createCrosbyDashboard(
+    { parent: { identifier: "#129", title: "Parent" }, children: [] },
+    { mode: "manual", runId: "run-cli-watch", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+  const eventsPath = persistDashboardEvent(dashboard, { runsRoot });
+
+  const child = spawn(process.execPath, [
+    RUNNER_SCRIPT_PATH,
+    "--events-path",
+    eventsPath,
+  ]);
+
+  let stdout = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+
+  // Give the CLI process time to render once, then confirm it has not
+  // exited on its own (regression: an unref'd interval timer let the
+  // process exit immediately after the first render, so the dashboard
+  // pane never reflected later run updates).
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(child.exitCode, null, "CLI watch process should still be running");
+
+  dashboard.currentIssueKey = "#130";
+  dashboard.updatedAt = "2026-08-02T00:00:01.000Z";
+  fs.appendFileSync(eventsPath, `${JSON.stringify(dashboard)}\n`);
+
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  child.kill();
+
+  const renders = stdout.split("Crosby #129").filter((chunk) => chunk.trim().length > 0);
+  assert.ok(
+    renders.length >= 2,
+    `expected the CLI to reprint after the appended event, got ${renders.length} render(s): ${stdout}`,
+  );
 });

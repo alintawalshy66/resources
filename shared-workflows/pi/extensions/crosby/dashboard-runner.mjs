@@ -137,7 +137,6 @@ export function watchDashboardEventsPath(eventsPath, options = {}) {
 
   tick();
   const timer = setInterval(tick, intervalMs);
-  if (typeof timer.unref === "function") timer.unref();
 
   return function stop() {
     stopped = true;
