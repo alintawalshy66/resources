@@ -1,16 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   createCrosbyDashboard,
+  getDashboardEventsPath,
   markDashboardExecutionFinalized,
+  markDashboardExecutionFinished,
   markDashboardExecutionStarted,
   markDashboardFatalError,
   markDashboardHerdrWorkerStarted,
   markDashboardPaneOpened,
+  persistDashboardEvent,
   reconcileDashboardFromQueue,
   renderCrosbyCompactDashboard,
   renderCrosbyDashboard,
 } from "./dashboard.mjs";
+
+function makeTempRunsRoot() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "crosby-dashboard-test-"));
+}
+
+function readEventLines(eventsPath) {
+  return fs
+    .readFileSync(eventsPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
 
 test("Crosby dashboard renders loaded, in-progress, worker, and finalized task states", () => {
   const dashboard = createCrosbyDashboard(
@@ -324,4 +342,120 @@ test("Crosby compact dashboard shows only parent state, last event, and dashboar
     "Last: #135 started",
     "Dashboard: pane pane-42",
   ]);
+});
+
+test("getDashboardEventsPath resolves the run-scoped events.jsonl path from runId", () => {
+  const runsRoot = makeTempRunsRoot();
+  const dashboard = createCrosbyDashboard(
+    { parent: { identifier: "#129", title: "Parent" }, children: [] },
+    { mode: "manual", runId: "run-abc", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  const eventsPath = getDashboardEventsPath(dashboard, { runsRoot });
+
+  assert.equal(eventsPath, path.join(runsRoot, "run-abc", "events.jsonl"));
+});
+
+test("persistDashboardEvent appends the current dashboard state as one JSON line, creating parent dirs", () => {
+  const runsRoot = makeTempRunsRoot();
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#130",
+          title: "First task",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "manual", runId: "run-persist", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  const eventsPath = persistDashboardEvent(dashboard, { runsRoot });
+
+  assert.equal(eventsPath, path.join(runsRoot, "run-persist", "events.jsonl"));
+  assert.ok(fs.existsSync(eventsPath));
+
+  const lines = readEventLines(eventsPath);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].runId, "run-persist");
+  assert.equal(lines[0].tasks[0].issueKey, "#130");
+});
+
+test("persistDashboardEvent is append-only across multiple mutations", () => {
+  const runsRoot = makeTempRunsRoot();
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#130",
+          title: "First task",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "manual", runId: "run-append", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  persistDashboardEvent(dashboard, { runsRoot });
+
+  markDashboardExecutionStarted(dashboard, {
+    child: { identifier: "#130", title: "First task" },
+    now: () => "2026-08-02T00:00:01.000Z",
+  });
+  persistDashboardEvent(dashboard, { runsRoot });
+
+  markDashboardHerdrWorkerStarted(dashboard, {
+    issueKey: "#130",
+    paneId: "pane-1",
+    now: () => "2026-08-02T00:00:02.000Z",
+  });
+  persistDashboardEvent(dashboard, { runsRoot });
+
+  markDashboardExecutionFinished(dashboard, {
+    child: { identifier: "#130", title: "First task" },
+    workerResult: { outcome: "done", summary: "ok" },
+    now: () => "2026-08-02T00:00:03.000Z",
+  });
+  persistDashboardEvent(dashboard, { runsRoot });
+
+  markDashboardExecutionFinalized(dashboard, {
+    child: { identifier: "#130", title: "First task" },
+    workerResult: { outcome: "done", summary: "ok" },
+    now: () => "2026-08-02T00:00:04.000Z",
+  });
+  persistDashboardEvent(dashboard, { runsRoot });
+
+  reconcileDashboardFromQueue(
+    dashboard,
+    { parent: { identifier: "#129", title: "Parent feature" }, children: [] },
+    { now: () => "2026-08-02T00:00:05.000Z" },
+  );
+  persistDashboardEvent(dashboard, { runsRoot });
+
+  markDashboardFatalError(dashboard, new Error("boom"), {
+    now: () => "2026-08-02T00:00:06.000Z",
+  });
+  persistDashboardEvent(dashboard, { runsRoot });
+
+  markDashboardPaneOpened(dashboard, {
+    paneId: "pane-2",
+    now: () => "2026-08-02T00:00:07.000Z",
+  });
+  const eventsPath = persistDashboardEvent(dashboard, { runsRoot });
+
+  const lines = readEventLines(eventsPath);
+  assert.equal(lines.length, 8);
+  assert.equal(lines[0].updatedAt, "2026-08-02T00:00:00.000Z");
+  assert.equal(lines[7].updatedAt, "2026-08-02T00:00:07.000Z");
+  assert.equal(lines[7].dashboardPaneId, "pane-2");
+});
+
+test("persistDashboardEvent returns null when the dashboard has no runId", () => {
+  const runsRoot = makeTempRunsRoot();
+  const eventsPath = persistDashboardEvent({ tasks: [] }, { runsRoot });
+
+  assert.equal(eventsPath, null);
 });

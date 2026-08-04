@@ -11,6 +11,7 @@ import {
   markDashboardFatalError,
   markDashboardHerdrWorkerStarted,
   markDashboardPaneOpened,
+  persistDashboardEvent,
   reconcileDashboardFromQueue,
   renderCrosbyCompactDashboard,
   renderCrosbyDashboard,
@@ -61,6 +62,7 @@ function updateCrosbyDashboardWidget(ctx: any, dashboard: any) {
 function createCrosbyDashboardController(ctx: any, queue: any, mode: string) {
   let dashboard = createCrosbyDashboard(queue, { mode });
   updateCrosbyDashboardWidget(ctx, dashboard);
+  persistDashboardEvent(dashboard);
 
   return {
     get dashboard() {
@@ -69,35 +71,43 @@ function createCrosbyDashboardController(ctx: any, queue: any, mode: string) {
     reset(nextQueue: any, nextMode = mode) {
       dashboard = createCrosbyDashboard(nextQueue, { mode: nextMode });
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
       return dashboard;
     },
     executionStarted(event: any) {
       markDashboardExecutionStarted(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     herdrWorkerStarted(event: any) {
       markDashboardHerdrWorkerStarted(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     dashboardPaneOpened(event: any) {
       markDashboardPaneOpened(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     executionFinished(event: any) {
       markDashboardExecutionFinished(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     executionFinalized(event: any) {
       markDashboardExecutionFinalized(dashboard, event);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     queueRefreshed(queue: any) {
       reconcileDashboardFromQueue(dashboard, queue);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
     fatal(error: unknown) {
       markDashboardFatalError(dashboard, error);
       updateCrosbyDashboardWidget(ctx, dashboard);
+      persistDashboardEvent(dashboard);
     },
   };
 }
