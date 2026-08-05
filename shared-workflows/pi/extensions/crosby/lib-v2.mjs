@@ -158,6 +158,16 @@ export function extractEffortOverride(issue) {
   return extractLabelValue(issue, "effort:");
 }
 
+export function buildPiWorkerExtraArgs({ model, effort } = {}) {
+  const args = [];
+  if (model) args.push("--model", model);
+  // pi's CLI flag for reasoning effort is `--thinking <level>`, not
+  // `--effort`. The `effort:<level>` GitHub label name is domain language
+  // for this repo's issue workflow; translate it to the real pi flag here.
+  if (effort) args.push("--thinking", effort);
+  return args;
+}
+
 export function buildPiWorkerSessionName(issueKey) {
   const raw = String(issueKey ?? "").trim();
   const issueNumber = raw.match(/\d+/)?.[0];

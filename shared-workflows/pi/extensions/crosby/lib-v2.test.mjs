@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   extractEffortOverride,
   extractLabelValue,
@@ -35,6 +36,22 @@ test("buildPiWorkerSessionName names Pi sessions from GitHub issue numbers", () 
   );
   assert.equal(buildPiWorkerSessionName("manual worker"), "crosby-manual-worker");
   assert.equal(buildPiWorkerSessionName(null), "crosby-worker");
+});
+
+test("buildPiWorkerExtraArgs passes effort labels to pi as --thinking, not --effort", () => {
+  // Regression: pi's CLI has no --effort flag (it errors with
+  // "Unknown option: --effort"); the real flag is --thinking <level>.
+  assert.deepEqual(
+    buildPiWorkerExtraArgs({ model: "claude-opus-4.7", effort: "low" }),
+    ["--model", "claude-opus-4.7", "--thinking", "low"],
+  );
+  assert.deepEqual(
+    buildPiWorkerExtraArgs({ effort: "medium" }),
+    ["--thinking", "medium"],
+  );
+  assert.deepEqual(buildPiWorkerExtraArgs({ model: "gpt-5.5" }), ["--model", "gpt-5.5"]);
+  assert.deepEqual(buildPiWorkerExtraArgs({}), []);
+  assert.deepEqual(buildPiWorkerExtraArgs(), []);
 });
 
 test("runWatchCycle keeps fatal worker issues in Build and does not move them to review", async () => {

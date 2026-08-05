@@ -18,6 +18,7 @@ import {
   renderCrosbyDashboard,
 } from "./dashboard.mjs";
 import {
+  buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   fetchParentQueue,
   parseCrosbyCommandArgs,
@@ -1131,13 +1132,7 @@ async function runIsolatedWorker(
 
   const invocation = getPiInvocation();
   const sessionName = buildPiWorkerSessionName(opts.issueKey);
-  const extraArgs: string[] = [];
-  if (opts.model) {
-    extraArgs.push("--model", opts.model);
-  }
-  if (opts.effort) {
-    extraArgs.push("--effort", opts.effort);
-  }
+  const extraArgs = buildPiWorkerExtraArgs({ model: opts.model, effort: opts.effort });
 
   const result = await pi.exec(
     invocation.command,
@@ -1181,13 +1176,7 @@ async function runIsolatedWorkerInHerdrPane(
   },
 ) {
   const sessionName = buildPiWorkerSessionName(opts.issueKey);
-  const extraArgs: string[] = [];
-  if (opts.model) {
-    extraArgs.push("--model", opts.model);
-  }
-  if (opts.effort) {
-    extraArgs.push("--effort", opts.effort);
-  }
+  const extraArgs = buildPiWorkerExtraArgs({ model: opts.model, effort: opts.effort });
 
   const workDir = await mkdtemp(path.join(os.tmpdir(), "crosby-worker-"));
   const promptPath = path.join(workDir, "prompt.md");

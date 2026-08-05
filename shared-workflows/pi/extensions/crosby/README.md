@@ -74,7 +74,7 @@ Required labels:
 Optional per-child worker overrides:
 
 - `model:<model-id>` — routes this child's Pi build worker to a specific model, e.g. `model:gpt-5.5` or `model:claude-opus-4.7`. If absent, the worker uses Pi's normal config default.
-- `effort:<effort-level>` — sets the reasoning effort for the Pi build worker, e.g. `effort:medium`. If absent, the worker uses Pi's normal config default.
+- `effort:<effort-level>` — sets the reasoning effort for the Pi build worker, e.g. `effort:medium`. If absent, the worker uses Pi's normal config default. This is passed to `pi` as `--thinking <effort-level>` (pi's CLI flag for reasoning effort), so `effort-level` must be one of pi's supported thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
 Both labels are additive to the required labels above; Crosby does not validate the values, so unknown model or effort names surface as Pi worker errors. First matching label wins if multiple `model:*` or `effort:*` labels are present.
 
