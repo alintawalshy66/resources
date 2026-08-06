@@ -25,6 +25,7 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 6. Treat GitHub Issues as the committed execution view, not the drafting surface.
 7. Make AFK/buildable issues parallel-ready by giving Crosby a tight execution envelope: expected files, do-not-touch boundaries, test command, and advisory locks.
 8. Never create GitHub child issues before explicit user approval.
+9. If no parent issue exists, draft and create a parent issue from the approved context before creating children.
 
 ## Workflow
 
@@ -33,7 +34,7 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 - Read the plan, spec, or PRD.
 - Identify the user stories and the minimum viable outcome.
 - Resolve the originating GitHub parent issue from the current feature context.
-- Load the parent issue metadata needed for child creation:
+- If a parent issue exists, load the parent issue metadata needed for child creation:
   - parent issue number or URL
   - parent title/body
   - parent labels
@@ -44,7 +45,13 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
   gh issue view <PARENT> --json number,title,body,state,labels,milestone,url
   ```
 
-- If the parent issue cannot be resolved confidently, or its labels/milestone cannot be loaded confidently, stop and ask the user.
+- If no parent issue can be resolved confidently, draft a parent issue from the source context instead of stopping:
+  - parent title that captures the feature/initiative
+  - parent body summarizing context, scope, constraints, and the planned child checklist placeholder
+  - parent labels: `type:parent`, `status:ready`, the appropriate work-type label (`wt:development` or `wt:process-automation`), and any justified local-folder routing label
+  - parent milestone, if one can be inferred confidently; otherwise leave the milestone unset and call that out
+- Present the drafted parent issue with the child issue list for approval before creating anything in GitHub.
+- If an existing parent issue is found but its labels/milestone cannot be loaded confidently, stop and ask the user before creating children.
 
 ### 2) Draft slices
 
@@ -58,6 +65,17 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
   - `## Test Command` — the narrowest useful verification command.
   - `## Crosby Locks` — advisory file/directory/domain locks used to avoid launching conflicting children in parallel.
 - If an AFK issue is too vague to name expected files, tests, and locks, mark it HITL or split/add an investigation issue first.
+- Only add worker override labels when there is a concrete reason to override Crosby/Pi defaults.
+- When adding a model override, use a provider-qualified label: `model:<provider>/<model-id>`.
+  - Good: `model:github-copilot/gpt-5.5`
+  - Good: `model:github-copilot/claude-opus-4.7`
+  - Avoid bare model labels like `model:gpt-5.5`; Pi can resolve them to an unavailable provider.
+- When adding an effort override, use `effort:<thinking-level>` where `<thinking-level>` is one of Pi's supported thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+- If a model override is proposed, verify or ask the user to verify it before issue creation with:
+
+  ```bash
+  pi --model <provider>/<model-id> --thinking <level> -p 'Reply OK'
+  ```
 
 ### 3) Review with the user
 
@@ -76,14 +94,24 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 
 ### 5) Finalize the issue list for approval
 
+- If a new parent is needed, present the proposed parent title, body summary, labels, and milestone decision.
 - Present the issue titles in dependency order.
 - Include the acceptance criteria for each issue.
 - Include proposed labels for each issue.
-- Explicitly ask for approval before creating anything in GitHub.
+- Explicitly ask for approval before creating anything in GitHub, including the parent issue when one does not already exist.
 
-### 6) Create GitHub child issues after approval
+### 6) Create GitHub parent and child issues after approval
 
-Only after explicit user approval, create the approved issues in GitHub as child issues linked to the originating parent issue.
+Only after explicit user approval, create the approved issues in GitHub.
+
+If no parent issue existed, create the parent first with `gh issue create`. The created parent should include:
+
+- A feature/initiative title derived from the approved context.
+- A body summarizing the source context, scope, constraints, and a `## Child Issues` placeholder to be updated after child creation.
+- Labels: `type:parent`, `status:ready`, the appropriate work-type label, and any justified local-folder routing label.
+- The inferred milestone, when one was approved.
+
+Then create the approved child issues linked to the parent issue.
 
 Use `gh issue create` for each child. Each created child should include:
 
@@ -98,14 +126,20 @@ Use `gh issue create` for each child. Each created child should include:
   - AFK/buildable issues: `mode:afk`, `status:ready-to-build`
   - HITL/manual issues: `mode:hitl`, `status:ready` or `status:review`
   - work type: `wt:development` or `wt:process-automation`
-  - optional worker routing labels only when justified: `model:<model-id>` and/or `effort:<low|medium|high|...>`
+  - optional worker routing labels only when justified:
+    - `model:<provider>/<model-id>` for provider-qualified model selection, e.g. `model:github-copilot/gpt-5.5`
+    - `effort:<thinking-level>` for Pi thinking level, where thinking level is `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`
 
 Default effort guidance:
 
-- Do not add `effort:*` when the repo/Crosby default is appropriate.
+- Do not add `model:*` when the repo/Crosby/Pi default model is appropriate.
+- Do not add `effort:*` when the repo/Crosby/Pi default thinking level is appropriate.
+- Always include the provider in model labels: `model:<provider>/<model-id>`.
+- Never use bare model labels such as `model:gpt-5.5` or `model:claude-opus-4.7`.
 - Use `effort:low` for mechanical, tightly scoped changes.
 - Use `effort:medium` for normal implementation with some design judgement.
 - Reserve `effort:high`+ for high-risk architecture, security, data migration, concurrency, or broad cross-module work.
+- Only use `effort:xhigh` or `effort:max` for exceptional high-risk work where the extra thinking cost/latency is justified.
 
 Example:
 
@@ -129,14 +163,22 @@ After creating the children:
   - [ ] #124 Add frontend empty state
   ```
 
-- Do not create a new parent issue.
+- Do not create a new parent issue when an existing parent was resolved.
+- Verify the parent has `type:parent`, an appropriate status label, work-type label, optional routing label, and approved milestone.
 - Verify each child has the correct parent reference, milestone, labels, and initial status label.
 - If verification shows inherited labels were missed, add the missing labels; never remove existing labels unless the user explicitly requested removal.
-- Report the created issue numbers, URLs, inherited milestone, inherited labels, mode labels, and initial status labels back to the user.
+- Report the created parent issue when applicable, plus child issue numbers, URLs, inherited milestone, inherited labels, mode labels, and initial status labels back to the user.
 
 ## Output Format
 
-Use a numbered list where each proposed issue includes:
+If a new parent issue is needed, first show:
+
+- Proposed parent title
+- Proposed parent body summary
+- Proposed parent labels
+- Proposed parent milestone, or `none` with reason
+
+Use a numbered list where each proposed child issue includes:
 
 - Title
 - Type: HITL or AFK
@@ -150,11 +192,11 @@ Use a numbered list where each proposed issue includes:
 - Crosby locks (AFK required)
 - Test command (AFK required)
 - Acceptance criteria
-- Proposed labels, including any justified `model:*` or `effort:*` override
+- Proposed labels, including any justified provider-qualified `model:<provider>/<model-id>` or `effort:<thinking-level>` override
 
 After approval and creation, also report:
 
-- GitHub parent issue
+- GitHub parent issue, including whether it was existing or newly created
 - Created child issue numbers
 - Created child issue URLs
 - Created child milestone
@@ -170,9 +212,10 @@ After approval and creation, also report:
 - Would the issue list support incremental delivery?
 - Is each AFK/buildable issue parallel-ready with expected files, do-not-touch boundaries, a narrow test command, and Crosby locks?
 - Are vague or discovery-heavy items marked HITL or split into investigation-first issues instead of AFK parallel work?
-- Are `model:*` and `effort:*` labels used only when the task justifies overriding defaults?
+- Are `model:*` and `effort:*` labels used only when the task justifies overriding defaults, and are model overrides provider-qualified such as `model:github-copilot/gpt-5.5`?
 - Are the local planning artifacts still aligned with the approved issue breakdown?
 - Has explicit user approval been captured before GitHub issue creation?
+- If no parent existed, is the proposed parent clear, labeled `type:parent`, assigned an appropriate status/work-type/routing label set, and approved before creation?
 - Will every created child inherit the parent milestone and relevant labels?
 - Will every created child receive the correct additive `mode:*` and `status:*` labels without replacing inherited labels?
 - Was inheritance and type/status/mode assignment verified after creation?
@@ -192,7 +235,8 @@ After approval and creation, also report:
 - Update `plan.md` and/or `tasks.md` before creating GitHub issues.
 
 **Parent GitHub issue cannot be resolved**
-- Stop and ask the user to provide or confirm the parent issue number or URL.
+- Draft a new parent issue from the available context and include it in the approval request.
+- If there is not enough context to draft a meaningful parent title, scope, labels, or milestone decision, ask the user for the missing details before creating anything.
 
 **User has not explicitly approved the issue set**
 - Do not create any GitHub issues.
