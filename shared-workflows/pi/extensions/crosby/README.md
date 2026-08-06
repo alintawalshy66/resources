@@ -143,7 +143,7 @@ What happens:
 3. Picks the next unblocked child with `status:ready-to-build`.
 4. Ensures the repo is on the parent feature branch.
 5. Moves that child to `status:building`.
-6. Runs the Pi worker with a persistent session named from the child issue number (for example `gh-135`) so it is easy to find later with `pi -r` / `/resume`.
+6. Runs the Pi worker with a persistent session named from the child issue number (for example `gh-135`) so it is easy to find later with `pi -r` / `/resume`. The worker prompt requires leaf workers to `git add`, `git commit` with a message referencing the issue key, verify `git status --porcelain` is empty before returning `done`, include commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` if they cannot satisfy that commit protocol.
 7. Validates the worker result against git state:
    - Crosby snapshots `HEAD` on the parent branch before launching the worker
    - `outcome: "done"` closes the child only if a new descendant commit exists on the parent branch after the worker finishes
@@ -168,6 +168,7 @@ Current behavior:
 - moves that child to `status:building`
 - snapshots the current git branch and `HEAD`
 - runs the Pi worker with a persistent `gh-<issue-number>` session name for resume lookup
+- instructs the worker to stage and commit its work, reference the issue key in the commit message, verify `git status --porcelain` is empty before `done`, report commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` when it cannot commit cleanly
 - closes `done` children only when worker execution produced a new descendant commit on the parent branch; otherwise moves the child to `status:review` with a clear no-commit diagnostic
 - posts progress back to the parent
 - when all child issues are closed, posts the final summary and moves the parent to `status:review`

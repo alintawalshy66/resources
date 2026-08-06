@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
+  buildRalphLoopPrompt,
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
@@ -36,6 +37,24 @@ test("buildPiWorkerSessionName names Pi sessions from GitHub issue numbers", () 
   );
   assert.equal(buildPiWorkerSessionName("manual worker"), "crosby-manual-worker");
   assert.equal(buildPiWorkerSessionName(null), "crosby-worker");
+});
+
+test("buildRalphLoopPrompt requires commit postconditions before done results", () => {
+  const prompt = buildRalphLoopPrompt({
+    identifier: "#24",
+    title: "Require commit postconditions in Crosby worker prompt",
+    body: "## Acceptance Criteria",
+  });
+
+  assert.match(prompt, /git add/i);
+  assert.match(prompt, /git commit/i);
+  assert.match(prompt, /commit message must reference #24/i);
+  assert.match(prompt, /git status --porcelain/i);
+  assert.match(prompt, /empty before returning outcome done/i);
+  assert.match(prompt, /commit hash/i);
+  assert.match(prompt, /changes\[\]/i);
+  assert.match(prompt, /return outcome review/i);
+  assert.match(prompt, /requiredHumanAction/i);
 });
 
 test("buildPiWorkerExtraArgs passes effort labels to pi as --thinking, not --effort", () => {

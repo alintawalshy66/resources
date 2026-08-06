@@ -370,6 +370,17 @@ export function selectNextExecuteIssue(issues) {
   return executeIssues[0] ?? null;
 }
 
+function buildWorkerCommitProtocol(issueReference) {
+  return [
+    "Commit protocol before returning outcome done:",
+    "- Stage all completed work with git add before committing.",
+    `- Create at least one git commit with git commit; the commit message must reference ${issueReference}.`,
+    "- Run git status --porcelain and verify git status --porcelain is empty before returning outcome done.",
+    "- Include the resulting commit hash or hashes in changes[].",
+    "- If you cannot commit, cannot make git status --porcelain empty, or cannot provide commit hashes, return outcome review with requiredHumanAction instead of done.",
+  ];
+}
+
 export function buildRalphLoopPrompt(child) {
   const issueKey = child?.identifier ?? "UNKNOWN-ISSUE";
   const serializedChild = JSON.stringify(child, null, 2);
@@ -390,6 +401,7 @@ export function buildRalphLoopPrompt(child) {
       "- If a nested child also has children, descend to its next unblocked status:ready-to-build child until you reach an executable leaf issue.",
       "- Move the executable leaf issue through status:building and close it when complete, or move it to status:review if human action is required.",
       `- When all direct children of ${issueKey} are closed, return outcome done for ${issueKey}. If runnable children remain, continue within this worker until the ${issueKey} child queue is exhausted or human action is required.`,
+      ...buildWorkerCommitProtocol("the executable leaf issue key"),
       "- A preloaded issue snapshot is included below so you have immediate context even before refreshing.",
       "",
       "Preloaded issue snapshot:",
@@ -411,6 +423,7 @@ export function buildRalphLoopPrompt(child) {
     "- If the refreshed issue has child issues, treat it as a container/parent queue: status:building is a valid resume state, find its next unblocked status:ready-to-build child, and continue through its child queue until exhausted or human action is required.",
     "- Only if the refreshed issue has no children, execute it as a leaf issue using ralph-loop/TDD discipline.",
     "- If Crosby already moved this issue to status:building before launching this worker, treat that as an explicit resume and proceed; do not fail solely because the current state is status:building.",
+    ...buildWorkerCommitProtocol(issueKey),
     "- A preloaded issue snapshot is included below so you have immediate context even before refreshing.",
     "",
     "Preloaded issue snapshot:",
