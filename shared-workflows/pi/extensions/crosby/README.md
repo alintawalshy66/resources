@@ -48,7 +48,7 @@ It uses:
   - model is inherited from normal Pi resolution/config
   - the Crosby control tab renders a live dashboard of parent child issues, including queued/in-progress/done/review/fatal state and worker pane IDs when available
   - when Crosby itself is running inside Herdr, each build worker starts as an interactive Pi agent in its own Herdr tab by default so progress/tool calls are visible while watch/manual execution loops
-  - when Crosby itself is running inside Herdr, a sibling dashboard pane opens in the same tab by default for both `/crosby #parent` and `/crosby --watch`, running the standalone dashboard runner against the current run's event log; the compact widget shows the dashboard pane ID once it is open
+  - when Crosby itself is running inside Herdr, a sibling dashboard pane opens in the same tab by default for both `/crosby #parent` and `/crosby --watch`, running the standalone dashboard runner against the current run's event log; the compact widget stays to one current-activity line and includes the dashboard pane ID once it is open
 - **Claude review worker** for explicit PR review
   - default model: `claude-sonnet-4-6`
   - default effort: `medium`
@@ -246,14 +246,15 @@ and an optional full dashboard pane opened in Herdr.
 
 ### Compact widget vs. full dashboard pane
 
-- **Compact widget**: a small `ctx.ui.setWidget` panel rendered inside the running Pi process
-  (Crosby control tab). It never shows the full task list. It shows:
+- **Compact widget**: a single-line `ctx.ui.setWidget` status rendered inside the running Pi process
+  (Crosby control tab). It never shows the full task list. It shows the current activity,
+  such as:
   ```text
-  Crosby #129: <parent title>
-  Last: <one-line lifecycle event>
-  Dashboard: pane <pane-id>
+  Crosby #129: #135 started · pane pane-42
   ```
-  The `Dashboard:` line only appears once a dashboard pane has actually been opened.
+  When no lifecycle event has occurred yet it shows the parent as idle; fatal runs show the
+  fatal reason on the same line. The pane suffix appears only after a dashboard pane has
+  actually been opened.
 - **Full dashboard pane**: a separate terminal pane running the standalone
   `dashboard-runner.mjs` script. It renders the full parent/child task list, per-task
   status (queued/in-progress/done/review/fatal), and the recent event history using the

@@ -305,7 +305,7 @@ test("Crosby dashboard deduplicates a repeated finalized event for the same outc
   assert.equal(dashboard.events[0].message, "#137 fatal");
 });
 
-test("Crosby compact dashboard shows only parent state, last event, and dashboard pane", () => {
+test("Crosby compact dashboard renders a single current-activity line", () => {
   const dashboard = createCrosbyDashboard(
     {
       parent: { identifier: "#129", title: "Parent feature" },
@@ -321,11 +321,7 @@ test("Crosby compact dashboard shows only parent state, last event, and dashboar
   );
 
   const before = renderCrosbyCompactDashboard(dashboard);
-  assert.deepEqual(before, [
-    "Crosby #129: Parent feature",
-    "Last: (no events yet)",
-    "Dashboard: pane not open",
-  ]);
+  assert.deepEqual(before, ["Crosby #129: idle — Parent feature"]);
 
   markDashboardExecutionStarted(dashboard, {
     child: { identifier: "#135", title: "Failure handling" },
@@ -337,11 +333,32 @@ test("Crosby compact dashboard shows only parent state, last event, and dashboar
   });
 
   const after = renderCrosbyCompactDashboard(dashboard);
-  assert.deepEqual(after, [
-    "Crosby #129: Parent feature",
-    "Last: #135 started",
-    "Dashboard: pane pane-42",
-  ]);
+  assert.equal(after.length, 1);
+  assert.deepEqual(after, ["Crosby #129: #135 started · pane pane-42"]);
+});
+
+test("Crosby compact dashboard keeps fatal state to a single concise line", () => {
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#135",
+          title: "Failure handling",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "manual", runId: "test-run", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  markDashboardFatalError(dashboard, "Worker exploded", {
+    now: () => "2026-08-02T00:00:01.000Z",
+  });
+
+  const rendered = renderCrosbyCompactDashboard(dashboard);
+  assert.equal(rendered.length, 1);
+  assert.deepEqual(rendered, ["Crosby #129 fatal: Worker exploded"]);
 });
 
 test("getDashboardEventsPath resolves the run-scoped events.jsonl path from runId", () => {

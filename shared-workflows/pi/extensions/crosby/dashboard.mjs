@@ -501,17 +501,11 @@ export function renderCrosbyDashboard(dashboard) {
 
 export function renderCrosbyCompactDashboard(dashboard) {
   if (!dashboard) return [];
-  const stateLine = `Crosby ${dashboard.parentIssueKey}: ${dashboard.parentTitle}`;
-  const lastLine = dashboard.lastEvent
-    ? `Last: ${dashboard.lastEvent.message}`
-    : "Last: (no events yet)";
-  const paneLine = dashboard.dashboardPaneId
-    ? `Dashboard: pane ${dashboard.dashboardPaneId}`
-    : "Dashboard: pane not open";
-
-  const lines = [stateLine, lastLine, paneLine];
   if (dashboard.fatalError) {
-    lines.push(`Error: ${dashboard.fatalError}`);
+    return [`Crosby ${dashboard.parentIssueKey} fatal: ${dashboard.fatalError}`];
   }
-  return lines;
+
+  const activity = dashboard.lastEvent?.message ?? `idle — ${dashboard.parentTitle}`;
+  const pane = dashboard.dashboardPaneId ? ` · pane ${dashboard.dashboardPaneId}` : "";
+  return [`Crosby ${dashboard.parentIssueKey}: ${activity}${pane}`];
 }
