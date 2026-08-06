@@ -1476,6 +1476,10 @@ export async function runWatchCycle(operations) {
   const routingErrors = [];
 
   for (const queue of executeParentQueues) {
+    if (typeof operations.onQueueLoaded === "function") {
+      await operations.onQueueLoaded(queue);
+    }
+
     if (getBuildingChildren(queue?.children).length > 0) {
       continue;
     }
@@ -1498,10 +1502,6 @@ export async function runWatchCycle(operations) {
         });
         continue;
       }
-    }
-
-    if (typeof operations.onQueueLoaded === "function") {
-      await operations.onQueueLoaded(queue);
     }
 
     const execution = await runSingleChildExecution(queue, {

@@ -112,6 +112,50 @@ test("runWatchCycle keeps fatal worker issues in Build and does not move them to
   assert.equal(result.workerResult.outcome, "fatal");
 });
 
+test("runWatchCycle reports refreshed queues before skipping non-runnable children", async () => {
+  const loadedQueues = [];
+  const result = await runWatchCycle({
+    fetchExecuteParentQueues: async () => [
+      {
+        parent: {
+          identifier: "#129",
+          title: "Symphony",
+          state: { name: "Execute", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#135",
+            title: "Manually completed child",
+            state: { name: "Done", type: "completed" },
+          },
+          {
+            identifier: "#136",
+            title: "Manual review child",
+            state: { name: "Review", type: "review" },
+          },
+          {
+            identifier: "#137",
+            title: "Manual building child",
+            state: { name: "Building", type: "started" },
+          },
+        ],
+      },
+    ],
+    onQueueLoaded: async (queue) => loadedQueues.push(queue),
+  });
+
+  assert.equal(result.status, "idle");
+  assert.equal(loadedQueues.length, 1);
+  assert.deepEqual(
+    loadedQueues[0].children.map((child) => [child.identifier, child.state.name]),
+    [
+      ["#135", "Done"],
+      ["#136", "Review"],
+      ["#137", "Building"],
+    ],
+  );
+});
+
 test("runWatchMode continues polling after a fatal worker result", async () => {
   const moved = [];
   let cycleCount = 0;

@@ -126,6 +126,71 @@ test("Crosby dashboard reconciles refreshed GitHub queue while keeping discovere
   assert.match(rendered, /☐ #131 Newly discovered task/);
 });
 
+test("Crosby dashboard reconciles stale worker state after manual GitHub intervention", () => {
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#130",
+          title: "Child completed by human",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+        {
+          identifier: "#131",
+          title: "Child moved to review by human",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+        {
+          identifier: "#132",
+          title: "Child reclaimed by human",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "watch", runId: "test-run", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  markDashboardHerdrWorkerStarted(dashboard, {
+    issueKey: "#130",
+    paneId: "pane-123",
+    agentName: "crosby-130",
+    label: "Crosby #130",
+    now: () => "2026-08-02T00:01:00.000Z",
+  });
+
+  reconcileDashboardFromQueue(
+    dashboard,
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#130",
+          title: "Child completed by human",
+          state: { name: "Done", type: "completed" },
+        },
+        {
+          identifier: "#131",
+          title: "Child moved to review by human",
+          state: { name: "Review", type: "review" },
+        },
+        {
+          identifier: "#132",
+          title: "Child reclaimed by human",
+          state: { name: "Building", type: "started" },
+        },
+      ],
+    },
+    { now: () => "2026-08-02T00:02:00.000Z" },
+  );
+
+  const rendered = renderCrosbyDashboard(dashboard).join("\n");
+  assert.match(rendered, /Progress: 1\/3 done, 2 left, 1 in progress, 1 in review/);
+  assert.match(rendered, /✅ #130 Child completed by human — pane pane-123/);
+  assert.match(rendered, /👀 #131 Child moved to review by human/);
+  assert.match(rendered, /🔄 #132 Child reclaimed by human/);
+});
+
 test("Crosby dashboard prioritizes unfinished work and only recent completed work when long", () => {
   const children = Array.from({ length: 18 }, (_, index) => {
     const issueNumber = 130 + index;
