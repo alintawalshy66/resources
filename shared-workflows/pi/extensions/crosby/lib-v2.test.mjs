@@ -201,6 +201,167 @@ test("runWatchMode continues polling after a fatal worker result", async () => {
   ]);
 });
 
+test("runQueueExecution downgrades done worker results to review when no new commit is found", async () => {
+  const calls = [];
+  const events = [];
+
+  const result = await runQueueExecution(
+    {
+      parent: {
+        identifier: "#129",
+        title: "Symphony",
+        branchName: "issue-129-symphony",
+        state: { name: "Execute", type: "started" },
+      },
+      children: [
+        {
+          identifier: "#135",
+          title: "Implement dashboard",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    {
+      moveIssue: async (issueKey, state) => calls.push(["moveIssue", issueKey, state]),
+      addComment: async (issueKey, body) => calls.push(["addComment", issueKey, body]),
+      snapshotGitState: async () => {
+        events.push("snapshot");
+        return { branch: "issue-129-symphony", head: "abc123" };
+      },
+      hasCommittedWorkSince: async () => {
+        events.push("verify");
+        return {
+          hasCommittedWork: false,
+          diagnostic:
+            "No new commit found on issue-129-symphony; HEAD remained abc123.",
+        };
+      },
+      runWorker: async () => {
+        events.push("worker");
+        return {
+          stdout: JSON.stringify({
+            issueKey: "#135",
+            issueTitle: "Implement dashboard",
+            outcome: "done",
+            summary: "Completed.",
+            changes: ["Updated dashboard implementation"],
+            tests: ["node --test"],
+          }),
+        };
+      },
+      refreshQueue: async () => ({
+        parent: {
+          identifier: "#129",
+          title: "Symphony",
+          state: { name: "Building", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#135",
+            title: "Implement dashboard",
+            state: { name: "Review", type: "review" },
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.deepEqual(events, ["snapshot", "worker", "verify"]);
+  assert.equal(result.completedChildren[0].workerResult.outcome, "review");
+  assert.deepEqual(calls.slice(0, 2), [
+    ["moveIssue", "#135", "Building"],
+    ["moveIssue", "#135", "Review"],
+  ]);
+  assert.equal(
+    calls.some((call) => call[0] === "moveIssue" && call[2] === "Done"),
+    false,
+  );
+  const progressComment = calls.find(([type]) => type === "addComment")[2];
+  assert.match(progressComment, /Status: Review/);
+  assert.match(progressComment, /No new commit found on issue-129-symphony/);
+  assert.match(progressComment, /commit the completed work/i);
+});
+
+test("runQueueExecution closes done worker results when committed work is found", async () => {
+  const calls = [];
+  const events = [];
+
+  const result = await runQueueExecution(
+    {
+      parent: {
+        identifier: "#129",
+        title: "Symphony",
+        branchName: "issue-129-symphony",
+        state: { name: "Execute", type: "started" },
+      },
+      children: [
+        {
+          identifier: "#135",
+          title: "Implement dashboard",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    {
+      moveIssue: async (issueKey, state) => calls.push(["moveIssue", issueKey, state]),
+      addComment: async (issueKey) => calls.push(["addComment", issueKey]),
+      snapshotGitState: async () => {
+        events.push("snapshot");
+        return { branch: "issue-129-symphony", head: "abc123" };
+      },
+      hasCommittedWorkSince: async () => {
+        events.push("verify");
+        return {
+          hasCommittedWork: true,
+          diagnostic:
+            "New commit def456 found on issue-129-symphony after abc123.",
+        };
+      },
+      runWorker: async () => {
+        events.push("worker");
+        return {
+          stdout: JSON.stringify({
+            issueKey: "#135",
+            issueTitle: "Implement dashboard",
+            outcome: "done",
+            summary: "Completed.",
+            changes: ["Updated dashboard implementation"],
+            tests: ["node --test"],
+          }),
+        };
+      },
+      refreshQueue: async () => ({
+        parent: {
+          identifier: "#129",
+          title: "Symphony",
+          state: { name: "Building", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#135",
+            title: "Implement dashboard",
+            state: { name: "Done", type: "completed" },
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.deepEqual(events, ["snapshot", "worker", "verify"]);
+  assert.equal(result.completedChildren[0].workerResult.outcome, "done");
+  assert.deepEqual(calls.slice(0, 2), [
+    ["moveIssue", "#135", "Building"],
+    ["moveIssue", "#135", "Done"],
+  ]);
+  assert.equal(
+    calls.some(
+      (call) =>
+        call[0] === "moveIssue" && call[1] === "#135" && call[2] === "Review",
+    ),
+    false,
+  );
+});
+
 test("runQueueExecution emits finalized and refreshed callbacks after each child result", async () => {
   const calls = [];
   let refreshed = false;

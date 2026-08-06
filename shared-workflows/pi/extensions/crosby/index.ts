@@ -702,6 +702,117 @@ async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
   return result.stdout.trim();
 }
 
+async function isGitAncestor(
+  pi: ExtensionAPI,
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+) {
+  const invocation = getGitInvocation([
+    "merge-base",
+    "--is-ancestor",
+    ancestor,
+    descendant,
+  ]);
+  const result = await pi.exec(invocation.command, invocation.args, { cwd });
+  if (result.code === 0) return true;
+  if (result.code === 1) return false;
+
+  const details = [result.stderr, result.stdout]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  throw new Error(
+    details
+      ? `Git ancestry check failed in ${cwd}. ${details}`
+      : `Git ancestry check failed in ${cwd}. Command: ${invocation.command} ${invocation.args.join(" ")}. Exit code: ${result.code}.`,
+  );
+}
+
+async function snapshotGitState(pi: ExtensionAPI, cwd?: string) {
+  if (!cwd) {
+    return {
+      available: false,
+      diagnostic: "No local project directory was resolved before worker execution.",
+    };
+  }
+
+  if (!(await isGitRepository(pi, cwd))) {
+    return {
+      available: false,
+      cwd,
+      diagnostic: `Resolved worker directory ${cwd} is not a git repository.`,
+    };
+  }
+
+  return {
+    available: true,
+    cwd,
+    branch: await getCurrentGitBranch(pi, cwd),
+    head: await getGitRevision(pi, cwd, "HEAD"),
+  };
+}
+
+async function hasCommittedWorkSince(
+  pi: ExtensionAPI,
+  cwd: string | undefined,
+  before: any,
+  parentIssue: any,
+) {
+  if (!before?.available) {
+    return {
+      hasCommittedWork: false,
+      diagnostic:
+        before?.diagnostic ??
+        "Crosby could not snapshot git state before worker execution.",
+    };
+  }
+
+  if (!cwd) {
+    return {
+      hasCommittedWork: false,
+      diagnostic: "No local project directory was resolved after worker execution.",
+    };
+  }
+
+  if (!(await isGitRepository(pi, cwd))) {
+    return {
+      hasCommittedWork: false,
+      diagnostic: `Resolved worker directory ${cwd} is not a git repository after worker execution.`,
+    };
+  }
+
+  const currentBranch = await getCurrentGitBranch(pi, cwd);
+  const currentHead = await getGitRevision(pi, cwd, "HEAD");
+  const expectedBranch = String(parentIssue?.branchName ?? before.branch ?? "").trim();
+
+  if (expectedBranch && currentBranch !== expectedBranch) {
+    return {
+      hasCommittedWork: false,
+      diagnostic: `Worker finished on branch ${currentBranch || "(detached HEAD)"}, expected parent branch ${expectedBranch}.`,
+    };
+  }
+
+  if (currentHead === before.head) {
+    return {
+      hasCommittedWork: false,
+      diagnostic: `No new commit found on ${currentBranch || "(detached HEAD)"}; HEAD remained ${currentHead}.`,
+    };
+  }
+
+  if (!(await isGitAncestor(pi, cwd, before.head, currentHead))) {
+    return {
+      hasCommittedWork: false,
+      diagnostic: `HEAD changed from ${before.head} to ${currentHead}, but the new HEAD is not descended from the pre-worker snapshot on ${currentBranch || "(detached HEAD)"}.`,
+    };
+  }
+
+  return {
+    hasCommittedWork: true,
+    diagnostic: `New commit ${currentHead} found on ${currentBranch || "(detached HEAD)"} after ${before.head}.`,
+  };
+}
+
 async function assertCleanWorkingTree(
   pi: ExtensionAPI,
   cwd: string,
@@ -1309,6 +1420,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
+              snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
+              hasCommittedWorkSince: ({ cwd, before, parent }) =>
+                hasCommittedWorkSince(pi, cwd, before, parent),
               refreshQueue: (parentIssueKey) =>
                 fetchParentQueue(parentIssueKey, (key) =>
                   loadIssueFromGitHub(pi, key),
@@ -1482,6 +1596,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
+          snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
+          hasCommittedWorkSince: ({ cwd, before, parent }) =>
+            hasCommittedWorkSince(pi, cwd, before, parent),
           refreshQueue: (parentIssueKey) =>
             fetchParentQueue(parentIssueKey, (key) =>
               loadIssueFromGitHub(pi, key),

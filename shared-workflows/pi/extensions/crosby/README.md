@@ -144,9 +144,11 @@ What happens:
 4. Ensures the repo is on the parent feature branch.
 5. Moves that child to `status:building`.
 6. Runs the Pi worker with a persistent session named from the child issue number (for example `gh-135`) so it is easy to find later with `pi -r` / `/resume`.
-7. Moves the child to:
-   - closed if complete
-   - `status:review` if human review/action is needed
+7. Validates the worker result against git state:
+   - Crosby snapshots `HEAD` on the parent branch before launching the worker
+   - `outcome: "done"` closes the child only if a new descendant commit exists on the parent branch after the worker finishes
+   - if no qualifying commit is found, Crosby downgrades the result to `status:review` with a diagnostic and human-action recovery note
+   - `outcome: "review"` still moves directly to `status:review`
 8. Posts a progress comment to the parent.
 9. If all children are closed, Crosby posts the final parent summary and moves the parent to `status:review`.
 
@@ -164,7 +166,9 @@ Current behavior:
 - picks the next unblocked child with `status:ready-to-build`
 - ensures the repo is on the parent feature branch
 - moves that child to `status:building`
+- snapshots the current git branch and `HEAD`
 - runs the Pi worker with a persistent `gh-<issue-number>` session name for resume lookup
+- closes `done` children only when worker execution produced a new descendant commit on the parent branch; otherwise moves the child to `status:review` with a clear no-commit diagnostic
 - posts progress back to the parent
 - when all child issues are closed, posts the final summary and moves the parent to `status:review`
 

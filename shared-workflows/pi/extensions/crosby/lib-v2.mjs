@@ -1104,6 +1104,84 @@ export function selectNextRunnableChild(queue) {
   };
 }
 
+async function snapshotGitStateForExecution(operations, event) {
+  if (typeof operations.snapshotGitState !== "function") return null;
+  return operations.snapshotGitState(event);
+}
+
+function normalizeCommittedWorkCheck(check) {
+  if (typeof check === "boolean") {
+    return {
+      hasCommittedWork: check,
+      diagnostic: check
+        ? "Committed work was detected."
+        : "No committed work was detected.",
+    };
+  }
+
+  return {
+    hasCommittedWork: check?.hasCommittedWork === true,
+    diagnostic:
+      typeof check?.diagnostic === "string" && check.diagnostic.trim()
+        ? check.diagnostic.trim()
+        : check?.hasCommittedWork === true
+          ? "Committed work was detected."
+          : "No committed work was detected.",
+  };
+}
+
+function buildNoCommittedWorkReviewResult(workerResult, child, check) {
+  const diagnostic = check.diagnostic;
+  return {
+    ...workerResult,
+    outcome: "review",
+    summary: `${workerResult.summary} Crosby could not verify committed work for this done result, so the issue requires human review.`,
+    changes: [
+      ...workerResult.changes,
+      `Crosby postcondition failed: ${diagnostic}`,
+    ],
+    requiredHumanAction: `Review ${child.identifier}: Crosby received outcome done but found no qualifying new commit on the parent branch. Commit the completed work on the parent branch or rerun the worker, then move the issue forward.`,
+    recoveryNotes: [
+      diagnostic,
+      "Crosby left the child issue in Review instead of closing it because done results require committed git work.",
+    ],
+  };
+}
+
+async function enforceDoneResultHasCommittedWork({
+  operations,
+  event,
+  workerResult,
+  gitSnapshot,
+}) {
+  if (workerResult.outcome !== "done") return workerResult;
+  if (
+    gitSnapshot === null ||
+    typeof operations.hasCommittedWorkSince !== "function"
+  ) {
+    return workerResult;
+  }
+
+  let check;
+  try {
+    check = normalizeCommittedWorkCheck(
+      await operations.hasCommittedWorkSince({
+        ...event,
+        before: gitSnapshot,
+        workerResult,
+      }),
+    );
+  } catch (error) {
+    check = {
+      hasCommittedWork: false,
+      diagnostic: `Failed to verify committed work after worker completion: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  if (check.hasCommittedWork) return workerResult;
+  return buildNoCommittedWorkReviewResult(workerResult, event.child, check);
+}
+
 async function resolveExecutableIssuePath(queue, operations, ancestors = []) {
   const classification = classifyChildIssues(queue?.children ?? []);
 
@@ -1230,6 +1308,18 @@ export async function runSingleChildExecution(queue, operations) {
     }
   }
 
+  const executionEvent = {
+    parent: queue.parent,
+    child,
+    topLevelChild,
+    path,
+    cwd: routing?.cwd,
+  };
+  const gitSnapshot = await snapshotGitStateForExecution(
+    operations,
+    executionEvent,
+  );
+
   const workerPrompt = buildRalphLoopPrompt(child);
   const rawWorkerResult = await operations.runWorker({
     parentIssueKey: queue.parent.identifier,
@@ -1239,15 +1329,17 @@ export async function runSingleChildExecution(queue, operations) {
     model: extractModelOverride(child),
     effort: extractEffortOverride(child),
   });
-  const workerResult = parseStructuredWorkerResult(rawWorkerResult, child);
+  let workerResult = parseStructuredWorkerResult(rawWorkerResult, child);
+  workerResult = await enforceDoneResultHasCommittedWork({
+    operations,
+    event: executionEvent,
+    workerResult,
+    gitSnapshot,
+  });
 
   if (typeof operations.onExecutionFinish === "function") {
     await operations.onExecutionFinish({
-      parent: queue.parent,
-      child,
-      topLevelChild,
-      path,
-      cwd: routing?.cwd,
+      ...executionEvent,
       rawWorkerResult,
       workerResult,
     });
@@ -1312,6 +1404,8 @@ export async function runQueueExecution(initialQueue, operations) {
       onExecutionFinish: operations.onExecutionFinish,
       onExecutionFinalized: operations.onExecutionFinalized,
       ensureParentBranch: operations.ensureParentBranch,
+      snapshotGitState: operations.snapshotGitState,
+      hasCommittedWorkSince: operations.hasCommittedWorkSince,
       routing: operations.routing,
     });
     completedChildren.push(execution);
@@ -1406,6 +1500,8 @@ export async function runWatchCycle(operations) {
       onExecutionFinish: operations.onExecutionFinish,
       onExecutionFinalized: operations.onExecutionFinalized,
       ensureParentBranch: operations.ensureParentBranch,
+      snapshotGitState: operations.snapshotGitState,
+      hasCommittedWorkSince: operations.hasCommittedWorkSince,
       routing: operations.routing,
     });
 
