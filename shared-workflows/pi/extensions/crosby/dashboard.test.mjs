@@ -402,6 +402,40 @@ test("Crosby compact dashboard renders a single current-activity line", () => {
   assert.deepEqual(after, ["Crosby #129: #135 started · pane pane-42"]);
 });
 
+test("Crosby compact dashboard combines completed and next-started updates on one line", () => {
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#135",
+          title: "First task",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+        {
+          identifier: "#136",
+          title: "Next task",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    { mode: "manual", runId: "test-run", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  markDashboardExecutionFinalized(dashboard, {
+    child: { identifier: "#135", title: "First task" },
+    workerResult: { outcome: "done", summary: "Done." },
+    now: () => "2026-08-02T00:00:01.000Z",
+  });
+  markDashboardExecutionStarted(dashboard, {
+    child: { identifier: "#136", title: "Next task" },
+    now: () => "2026-08-02T00:00:02.000Z",
+  });
+
+  const rendered = renderCrosbyCompactDashboard(dashboard);
+  assert.deepEqual(rendered, ["Crosby #129: #135 finished done · #136 started"]);
+});
+
 test("Crosby compact dashboard keeps fatal state to a single concise line", () => {
   const dashboard = createCrosbyDashboard(
     {

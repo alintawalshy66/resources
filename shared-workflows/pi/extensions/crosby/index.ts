@@ -53,11 +53,6 @@ function updateCrosbyDashboardWidget(ctx: any, dashboard: any) {
       renderCrosbyCompactDashboard(dashboard),
       { placement: "aboveEditor" },
     );
-    ctx.ui.setWidget(
-      "crosby-dashboard-pane",
-      renderCrosbyDashboard(dashboard),
-      { placement: "aboveEditor" },
-    );
   } catch {
     // Dashboard rendering is best-effort and should never stop Crosby execution.
   }

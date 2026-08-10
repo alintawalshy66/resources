@@ -499,13 +499,30 @@ export function renderCrosbyDashboard(dashboard) {
   return lines;
 }
 
+function getCompactActivity(dashboard) {
+  const events = Array.isArray(dashboard.events) ? dashboard.events : [];
+  const last = dashboard.lastEvent ?? events.at(-1);
+  if (!last?.message) return `idle — ${dashboard.parentTitle}`;
+
+  const previous = events.at(-2);
+  if (
+    /\bstarted$/i.test(last.message) &&
+    previous?.message &&
+    /\b(?:finished\s+\w+|fatal)$/i.test(previous.message)
+  ) {
+    return `${previous.message} · ${last.message}`;
+  }
+
+  return last.message;
+}
+
 export function renderCrosbyCompactDashboard(dashboard) {
   if (!dashboard) return [];
   if (dashboard.fatalError) {
     return [`Crosby ${dashboard.parentIssueKey} fatal: ${dashboard.fatalError}`];
   }
 
-  const activity = dashboard.lastEvent?.message ?? `idle — ${dashboard.parentTitle}`;
+  const activity = getCompactActivity(dashboard);
   const pane = dashboard.dashboardPaneId ? ` · pane ${dashboard.dashboardPaneId}` : "";
   return [`Crosby ${dashboard.parentIssueKey}: ${activity}${pane}`];
 }
