@@ -213,6 +213,31 @@ export function buildPiWorkerSessionName(issueKey) {
   return slug ? `crosby-${slug}` : "crosby-worker";
 }
 
+export function findExistingCrosbyDashboardPane(panes, options = {}) {
+  const currentTabId = String(options.tabId ?? "").trim();
+  const currentWorkspaceId = String(options.workspaceId ?? "").trim();
+  const candidates = (Array.isArray(panes) ? panes : []).filter((pane) => {
+    const label = String(pane?.label ?? "").trim().toLowerCase();
+    const title = String(
+      pane?.terminal_title_stripped ?? pane?.terminal_title ?? "",
+    ).trim().toLowerCase();
+    const matchesDashboard =
+      label === "crosby dashboard" || title.includes("crosby dashboard");
+    if (!matchesDashboard) return false;
+    if (currentTabId && pane?.tab_id !== currentTabId) return false;
+    if (!currentTabId && currentWorkspaceId && pane?.workspace_id !== currentWorkspaceId) {
+      return false;
+    }
+    return Boolean(pane?.pane_id);
+  });
+
+  if (candidates.length === 0) return null;
+  candidates.sort(
+    (a, b) => Number(b?.revision ?? 0) - Number(a?.revision ?? 0),
+  );
+  return candidates[0];
+}
+
 export function findExistingCrosbyWorkerAgent(agents, issueKey, cwd) {
   const issueNumber = String(issueKey ?? "").match(/\d+/)?.[0];
   if (!issueNumber) return null;

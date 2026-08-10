@@ -10,6 +10,7 @@ import {
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
+  findExistingCrosbyDashboardPane,
   findExistingCrosbyWorkerAgent,
   formatLifecycleFinishedEvent,
   formatLifecycleStartedEvent,
@@ -43,6 +44,56 @@ test("buildPiWorkerSessionName names Pi sessions from GitHub issue numbers", () 
   );
   assert.equal(buildPiWorkerSessionName("manual worker"), "crosby-manual-worker");
   assert.equal(buildPiWorkerSessionName(null), "crosby-worker");
+});
+
+test("findExistingCrosbyDashboardPane finds a dashboard pane in the current tab", () => {
+  const panes = [
+    {
+      pane_id: "other-dashboard",
+      label: "Crosby dashboard",
+      tab_id: "tab-2",
+      workspace_id: "workspace-1",
+      revision: 10,
+    },
+    {
+      pane_id: "current-dashboard",
+      label: "Crosby dashboard",
+      tab_id: "tab-1",
+      workspace_id: "workspace-1",
+      revision: 1,
+    },
+  ];
+
+  assert.equal(
+    findExistingCrosbyDashboardPane(panes, {
+      tabId: "tab-1",
+      workspaceId: "workspace-1",
+    })?.pane_id,
+    "current-dashboard",
+  );
+});
+
+test("findExistingCrosbyDashboardPane falls back to workspace when tab is unknown", () => {
+  const panes = [
+    {
+      pane_id: "old-dashboard",
+      label: "Crosby dashboard",
+      workspace_id: "workspace-1",
+      revision: 1,
+    },
+    {
+      pane_id: "new-dashboard",
+      label: "Crosby dashboard",
+      workspace_id: "workspace-1",
+      revision: 2,
+    },
+  ];
+
+  assert.equal(
+    findExistingCrosbyDashboardPane(panes, { workspaceId: "workspace-1" })
+      ?.pane_id,
+    "new-dashboard",
+  );
 });
 
 test("findExistingCrosbyWorkerAgent finds an existing issue worker in the same cwd", () => {

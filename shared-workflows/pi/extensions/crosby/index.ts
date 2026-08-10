@@ -21,6 +21,7 @@ import {
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   fetchParentQueue,
+  findExistingCrosbyDashboardPane,
   findExistingCrosbyWorkerAgent,
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
@@ -1222,6 +1223,52 @@ function getDashboardRunnerScriptPath() {
   );
 }
 
+async function findExistingDashboardPane(pi: ExtensionAPI) {
+  const args = ["pane", "list"];
+  if (process.env.HERDR_WORKSPACE_ID) {
+    args.push("--workspace", process.env.HERDR_WORKSPACE_ID);
+  }
+  const listed = await execHerdrJson(
+    pi,
+    args,
+    "Failed to inspect Herdr panes for an existing Crosby dashboard",
+  );
+  return findExistingCrosbyDashboardPane(listed?.result?.panes, {
+    tabId: process.env.HERDR_TAB_ID,
+    workspaceId: process.env.HERDR_WORKSPACE_ID,
+  });
+}
+
+async function startDashboardRunnerInPane(
+  pi: ExtensionAPI,
+  paneId: string,
+  runId: string,
+  options: { restart?: boolean } = {},
+) {
+  if (options.restart) {
+    await execHerdr(pi, ["pane", "send-keys", paneId, "ctrl+c"], "Failed to stop existing Crosby dashboard runner").catch(() => {
+      // The pane may already be idle; continue and start the new runner.
+    });
+  }
+
+  const nodeInvocation = getNodeInvocation([
+    getDashboardRunnerScriptPath(),
+    "--run",
+    runId,
+  ]);
+  await execHerdr(
+    pi,
+    [
+      "pane",
+      "run",
+      paneId,
+      nodeInvocation.command,
+      ...nodeInvocation.args,
+    ],
+    "Failed to start Crosby dashboard runner in Herdr pane",
+  );
+}
+
 async function openCrosbyDashboardPane(
   pi: ExtensionAPI,
   dashboardController: ReturnType<
@@ -1233,6 +1280,18 @@ async function openCrosbyDashboardPane(
   if (!shouldOpenCrosbyDashboardPane()) return;
 
   try {
+    const existingPane = await findExistingDashboardPane(pi).catch(() => null);
+    if (existingPane?.pane_id) {
+      await startDashboardRunnerInPane(
+        pi,
+        existingPane.pane_id,
+        dashboardController.dashboard.runId,
+        { restart: true },
+      );
+      dashboardController.dashboardPaneOpened({ paneId: existingPane.pane_id });
+      return;
+    }
+
     const opened = await execHerdr(
       pi,
       [
@@ -1251,26 +1310,15 @@ async function openCrosbyDashboardPane(
     await execHerdr(
       pi,
       ["pane", "rename", paneId, "Crosby dashboard"],
-      "Failed to label Herdr dashboard pane for Crosby",
+      "Failed to label Herdr pane for Crosby",
     ).catch(() => {
       // Pane labeling is best-effort; keep the dashboard pane running even if rename fails.
     });
 
-    const nodeInvocation = getNodeInvocation([
-      getDashboardRunnerScriptPath(),
-      "--run",
-      dashboardController.dashboard.runId,
-    ]);
-    await execHerdr(
+    await startDashboardRunnerInPane(
       pi,
-      [
-        "pane",
-        "run",
-        paneId,
-        nodeInvocation.command,
-        ...nodeInvocation.args,
-      ],
-      "Failed to start Crosby dashboard runner in Herdr pane",
+      paneId,
+      dashboardController.dashboard.runId,
     );
 
     dashboardController.dashboardPaneOpened({ paneId });
