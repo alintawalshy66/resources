@@ -10,6 +10,7 @@ import {
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
+  findExistingCrosbyWorkerAgent,
   formatLifecycleFinishedEvent,
   formatLifecycleStartedEvent,
   mergeChecklistAndNativeIssueChildren,
@@ -42,6 +43,59 @@ test("buildPiWorkerSessionName names Pi sessions from GitHub issue numbers", () 
   );
   assert.equal(buildPiWorkerSessionName("manual worker"), "crosby-manual-worker");
   assert.equal(buildPiWorkerSessionName(null), "crosby-worker");
+});
+
+test("findExistingCrosbyWorkerAgent finds an existing issue worker in the same cwd", () => {
+  const agents = [
+    {
+      agent: "pi",
+      name: "crosby-194-old",
+      agent_status: "idle",
+      cwd: "/home/walsc0/projects/other",
+      terminal_title_stripped: "π - gh-194 - other",
+      state_change_seq: 10,
+    },
+    {
+      agent: "pi",
+      name: "crosby-194-new",
+      agent_status: "idle",
+      cwd: "/home/walsc0/projects/dlhub",
+      pane_id: "pane-194",
+      terminal_title_stripped: "π - gh-194 - dlhub",
+      state_change_seq: 11,
+    },
+  ];
+
+  assert.equal(
+    findExistingCrosbyWorkerAgent(agents, "#194", "/home/walsc0/projects/dlhub")?.pane_id,
+    "pane-194",
+  );
+});
+
+test("findExistingCrosbyWorkerAgent prefers ready workers over working matches", () => {
+  const agents = [
+    {
+      agent: "pi",
+      name: "crosby-194-working",
+      agent_status: "working",
+      cwd: "/home/walsc0/projects/dlhub",
+      pane_id: "working-pane",
+      state_change_seq: 99,
+    },
+    {
+      agent: "pi",
+      name: "crosby-194-idle",
+      agent_status: "idle",
+      cwd: "/home/walsc0/projects/dlhub",
+      pane_id: "idle-pane",
+      state_change_seq: 1,
+    },
+  ];
+
+  assert.equal(
+    findExistingCrosbyWorkerAgent(agents, "#194", "/home/walsc0/projects/dlhub")?.pane_id,
+    "idle-pane",
+  );
 });
 
 test("buildRalphLoopPrompt requires commit postconditions before done results", () => {

@@ -21,6 +21,7 @@ import {
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   fetchParentQueue,
+  findExistingCrosbyWorkerAgent,
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
@@ -1391,6 +1392,34 @@ async function execHerdr(
   return result;
 }
 
+async function execHerdrJson(
+  pi: ExtensionAPI,
+  args: string[],
+  errorContext: string,
+) {
+  const result = await execHerdr(pi, args, errorContext);
+  try {
+    return JSON.parse(result.stdout || "null");
+  } catch (error) {
+    throw new Error(
+      `${errorContext}. Failed to parse Herdr JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function findExistingHerdrWorkerAgent(
+  pi: ExtensionAPI,
+  issueKey?: string | null,
+  cwd?: string,
+) {
+  const listed = await execHerdrJson(
+    pi,
+    ["agent", "list"],
+    "Failed to inspect existing Herdr agents for Crosby worker reuse",
+  );
+  return findExistingCrosbyWorkerAgent(listed?.result?.agents, issueKey, cwd);
+}
+
 function isHerdrPaneNotReadyForAgent(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return (
@@ -1514,6 +1543,79 @@ async function runIsolatedWorkerInHerdrPane(
   const interactivePrompt = buildInteractiveWorkerPrompt(prompt, resultPath);
   await writeFile(promptPath, interactivePrompt, "utf8");
   const label = opts.issueKey ? `Crosby ${opts.issueKey}` : "Crosby worker";
+
+  const existingAgent = await findExistingHerdrWorkerAgent(
+    pi,
+    opts.issueKey,
+    opts.cwd,
+  ).catch(() => null);
+  if (existingAgent) {
+    const target = existingAgent.name ?? existingAgent.pane_id;
+    if (!target) {
+      throw new Error(
+        `Found an existing Crosby worker for ${opts.issueKey ?? "the issue"}, but it has no reusable Herdr target.`,
+      );
+    }
+
+    if (String(existingAgent.agent_status ?? "") === "working") {
+      await execHerdr(
+        pi,
+        ["agent", "wait", target],
+        `Existing Crosby worker ${target} did not become ready for reuse`,
+      );
+    }
+
+    if (typeof opts.onHerdrWorkerStarted === "function") {
+      await opts.onHerdrWorkerStarted({
+        issueKey: opts.issueKey ?? null,
+        paneId: existingAgent.pane_id ?? null,
+        agentName: existingAgent.name ?? null,
+        label,
+        cwd: opts.cwd ?? null,
+        reused: true,
+      });
+    }
+
+    await execHerdr(
+      pi,
+      ["agent", "prompt", target, interactivePrompt, "--wait"],
+      `Failed to continue existing Crosby worker ${target}`,
+    );
+
+    let stdout = "";
+    try {
+      stdout = (await readFile(resultPath, "utf8")).trim();
+    } catch {
+      const transcript = await execHerdr(
+        pi,
+        [
+          "agent",
+          "read",
+          target,
+          "--source",
+          "recent-unwrapped",
+          "--lines",
+          "200",
+        ],
+        "Failed to read reused interactive Pi worker transcript after missing result file",
+      ).catch((error) => ({
+        stdout: error instanceof Error ? error.message : String(error),
+      }));
+      throw new Error(
+        `Reused interactive Pi worker ${target} did not write ${resultPath}. ` +
+          `Recovery: inspect pane ${existingAgent.pane_id ?? target}, then write the final Crosby JSON result to ${resultPath} or rerun Crosby. ` +
+          `Recent transcript:\n${transcript.stdout}`,
+      );
+    }
+
+    return {
+      stdout,
+      stderr: await readFile(stderrPath, "utf8").catch(() => ""),
+      code: 0,
+      killed: false,
+    };
+  }
+
   const agentName = makeHerdrAgentName(opts.issueKey);
   const opened = await openHerdrWorkerPane(pi, label, opts.cwd);
   const paneId = parseHerdrPaneId(opened.stdout);

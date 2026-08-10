@@ -213,6 +213,46 @@ export function buildPiWorkerSessionName(issueKey) {
   return slug ? `crosby-${slug}` : "crosby-worker";
 }
 
+export function findExistingCrosbyWorkerAgent(agents, issueKey, cwd) {
+  const issueNumber = String(issueKey ?? "").match(/\d+/)?.[0];
+  if (!issueNumber) return null;
+
+  const sessionName = buildPiWorkerSessionName(issueKey);
+  const expectedNamePrefix = `crosby-${issueNumber}-`;
+  const expectedTitlePattern = new RegExp(
+    `(?:^|\\s-\\s)${sessionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s-\\s|$)`,
+  );
+  const expectedCwd = String(cwd ?? "").trim();
+  const candidates = (Array.isArray(agents) ? agents : []).filter((agent) => {
+    if (agent?.agent !== "pi") return false;
+
+    const name = String(agent?.name ?? "");
+    const title = String(
+      agent?.terminal_title_stripped ?? agent?.terminal_title ?? "",
+    );
+    const matchesIssue =
+      name.startsWith(expectedNamePrefix) || expectedTitlePattern.test(title);
+    if (!matchesIssue) return false;
+
+    if (!expectedCwd) return true;
+    return [agent?.cwd, agent?.foreground_cwd]
+      .map((value) => String(value ?? "").trim())
+      .includes(expectedCwd);
+  });
+
+  if (candidates.length === 0) return null;
+
+  const readyStates = new Set(["idle", "done", "blocked"]);
+  candidates.sort((a, b) => {
+    const aReady = readyStates.has(String(a?.agent_status ?? ""));
+    const bReady = readyStates.has(String(b?.agent_status ?? ""));
+    if (aReady !== bReady) return aReady ? -1 : 1;
+    return Number(b?.state_change_seq ?? 0) - Number(a?.state_change_seq ?? 0);
+  });
+
+  return candidates[0];
+}
+
 export function resolveIssueWorkingDirectory(issue, options = {}) {
   const documentsRoot = options.documentsRoot ?? DEFAULT_DOCUMENTS_ROOT;
   const projectsRoot =
