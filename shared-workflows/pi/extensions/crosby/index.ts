@@ -784,6 +784,25 @@ async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
   return result.stdout.trim();
 }
 
+function getIssueNumber(issue: any) {
+  return String(issue?.number ?? issue?.identifier ?? "").match(/\d+/)?.[0] ?? "issue";
+}
+
+function slugifyBranchPart(value: string | undefined | null, fallback = "work") {
+  const slug = String(value ?? fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return slug || fallback;
+}
+
+function deriveChildBranchName(parentIssue: any, childIssue: any) {
+  const parentNumber = getIssueNumber(parentIssue);
+  const childNumber = getIssueNumber(childIssue);
+  return `crosby/${parentNumber}/${childNumber}-${slugifyBranchPart(childIssue?.title, "child")}`;
+}
+
 async function isGitAncestor(
   pi: ExtensionAPI,
   cwd: string,
@@ -840,6 +859,7 @@ async function hasCommittedWorkSince(
   cwd: string | undefined,
   before: any,
   parentIssue: any,
+  expectedBranchName?: string,
 ) {
   if (!before?.available) {
     return {
@@ -866,7 +886,9 @@ async function hasCommittedWorkSince(
 
   const currentBranch = await getCurrentGitBranch(pi, cwd);
   const currentHead = await getGitRevision(pi, cwd, "HEAD");
-  const expectedBranch = String(parentIssue?.branchName ?? before.branch ?? "").trim();
+  const expectedBranch = String(
+    expectedBranchName ?? parentIssue?.branchName ?? before.branch ?? "",
+  ).trim();
 
   if (expectedBranch && currentBranch !== expectedBranch) {
     return {
@@ -920,6 +942,120 @@ async function pushGitBranch(
   }
 
   await execGit(pi, ["push", "-u", "origin", resolvedBranchName], cwd);
+}
+
+async function prepareChildBranch(
+  pi: ExtensionAPI,
+  parentIssue: any,
+  childIssue: any,
+  cwd?: string,
+) {
+  const issueKey = childIssue?.identifier ?? "UNKNOWN-CHILD";
+  const parentBranch = String(parentIssue?.branchName ?? "").trim();
+  const childBranch = deriveChildBranchName(parentIssue, childIssue);
+
+  if (!cwd) {
+    throw new Error(
+      `Cannot create child branch for ${issueKey} because no local project directory was resolved.`,
+    );
+  }
+  if (!parentBranch) {
+    throw new Error(
+      `Cannot create child branch for ${issueKey} because parent ${parentIssue?.identifier ?? "UNKNOWN-PARENT"} has no branch name.`,
+    );
+  }
+  if (await hasUncommittedGitChanges(pi, cwd)) {
+    throw new Error(
+      `Cannot create child branch ${childBranch} for ${issueKey} because ${cwd} has uncommitted changes.`,
+    );
+  }
+
+  const currentBranch = await getCurrentGitBranch(pi, cwd);
+  if (currentBranch !== parentBranch) {
+    throw new Error(
+      `Cannot create child branch ${childBranch} for ${issueKey}; expected to be on parent branch ${parentBranch}, found ${currentBranch || "(detached HEAD)"}.`,
+    );
+  }
+
+  const parentHead = await getGitRevision(pi, cwd, "HEAD");
+  if (await hasLocalGitBranch(pi, cwd, childBranch)) {
+    await execGit(pi, ["checkout", childBranch], cwd);
+    const childHead = await getGitRevision(pi, cwd, "HEAD");
+    if (!(await isGitAncestor(pi, cwd, parentHead, childHead))) {
+      throw new Error(
+        `Existing child branch ${childBranch} does not descend from current parent HEAD ${parentHead}.`,
+      );
+    }
+  } else {
+    await execGit(pi, ["checkout", "-b", childBranch], cwd);
+  }
+
+  return { name: childBranch, parentBranch, parentHead };
+}
+
+async function runVerificationCommand(
+  pi: ExtensionAPI,
+  cwd: string | undefined,
+  command: string,
+) {
+  if (!cwd) {
+    throw new Error("No local project directory was resolved for verification.");
+  }
+
+  const result = await pi.exec("bash", ["-lc", command], { cwd });
+  if (result.code !== 0) {
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    throw new Error(
+      details
+        ? `Verification command failed: ${details}`
+        : `Verification command failed with exit code ${result.code}.`,
+    );
+  }
+}
+
+async function mergeChildBranchIntoParent(
+  pi: ExtensionAPI,
+  parentIssue: any,
+  childIssue: any,
+  childBranchInfo: any,
+  cwd?: string,
+) {
+  const issueKey = childIssue?.identifier ?? "UNKNOWN-CHILD";
+  const parentBranch = String(
+    childBranchInfo?.parentBranch ?? parentIssue?.branchName ?? "",
+  ).trim();
+  const childBranch = String(childBranchInfo?.name ?? "").trim();
+
+  if (!cwd) {
+    throw new Error(`Cannot merge ${issueKey} because no local project directory was resolved.`);
+  }
+  if (!parentBranch || !childBranch) {
+    throw new Error(`Cannot merge ${issueKey} because parent or child branch name is missing.`);
+  }
+  if (await hasUncommittedGitChanges(pi, cwd)) {
+    throw new Error(`Cannot merge ${childBranch} into ${parentBranch} because ${cwd} has uncommitted changes.`);
+  }
+
+  const childHead = await getGitRevision(pi, cwd, "HEAD");
+  const currentBranch = await getCurrentGitBranch(pi, cwd);
+  if (currentBranch !== childBranch) {
+    throw new Error(
+      `Cannot merge ${issueKey}; expected current branch ${childBranch}, found ${currentBranch || "(detached HEAD)"}.`,
+    );
+  }
+
+  await execGit(pi, ["checkout", parentBranch], cwd);
+  await execGit(pi, ["merge", "--ff-only", childBranch], cwd);
+
+  const parentHead = await getGitRevision(pi, cwd, "HEAD");
+  if (!(await isGitAncestor(pi, cwd, childHead, parentHead))) {
+    throw new Error(
+      `Merge verification failed: child HEAD ${childHead} is not contained in parent branch ${parentBranch}.`,
+    );
+  }
 }
 
 async function ensureParentBranch(
@@ -1502,9 +1638,15 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
+              prepareChildBranch: ({ parent, child, cwd }) =>
+                prepareChildBranch(pi, parent, child, cwd),
               snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
-              hasCommittedWorkSince: ({ cwd, before, parent }) =>
-                hasCommittedWorkSince(pi, cwd, before, parent),
+              hasCommittedWorkSince: ({ cwd, before, parent, expectedBranchName }) =>
+                hasCommittedWorkSince(pi, cwd, before, parent, expectedBranchName),
+              runVerificationCommand: ({ cwd, command }) =>
+                runVerificationCommand(pi, cwd, command),
+              mergeChildBranchIntoParent: ({ parent, child, childBranch, cwd }) =>
+                mergeChildBranchIntoParent(pi, parent, child, childBranch, cwd),
               refreshQueue: (parentIssueKey) =>
                 fetchParentQueue(parentIssueKey, (key) =>
                   loadIssueFromGitHub(pi, key),
@@ -1564,8 +1706,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
               onExecutionFinalized: (event) => {
                 dashboardController?.executionFinalized(event);
               },
-              onParentFinalized: ({ finalSummary }) => {
+              onParentFinalized: ({ finalSummary, testingSummary }) => {
                 pi.appendEntry("crosby-final-human-summary", finalSummary);
+                pi.appendEntry("crosby-final-testing-summary", testingSummary);
               },
               onQueueRefreshed: (queue) => {
                 dashboardController?.queueRefreshed(queue);
@@ -1692,9 +1835,15 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
+          prepareChildBranch: ({ parent, child, cwd }) =>
+            prepareChildBranch(pi, parent, child, cwd),
           snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
-          hasCommittedWorkSince: ({ cwd, before, parent }) =>
-            hasCommittedWorkSince(pi, cwd, before, parent),
+          hasCommittedWorkSince: ({ cwd, before, parent, expectedBranchName }) =>
+            hasCommittedWorkSince(pi, cwd, before, parent, expectedBranchName),
+          runVerificationCommand: ({ cwd, command }) =>
+            runVerificationCommand(pi, cwd, command),
+          mergeChildBranchIntoParent: ({ parent, child, childBranch, cwd }) =>
+            mergeChildBranchIntoParent(pi, parent, child, childBranch, cwd),
           refreshQueue: (parentIssueKey) =>
             fetchParentQueue(parentIssueKey, (key) =>
               loadIssueFromGitHub(pi, key),
@@ -1727,8 +1876,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           onExecutionFinalized: (event) => {
             dashboardController?.executionFinalized(event);
           },
-          onParentFinalized: ({ finalSummary }) => {
+          onParentFinalized: ({ finalSummary, testingSummary }) => {
             pi.appendEntry("crosby-final-human-summary", finalSummary);
+            pi.appendEntry("crosby-final-testing-summary", testingSummary);
           },
           onQueueRefreshed: (refreshedQueue) => {
             dashboardController?.queueRefreshed(refreshedQueue);

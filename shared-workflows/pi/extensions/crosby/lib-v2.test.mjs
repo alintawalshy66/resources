@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildFinalParentSummary,
+  buildFinalTriggerTestingSummary,
   buildParentProgressComment,
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
@@ -13,6 +14,7 @@ import {
   formatLifecycleStartedEvent,
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
+  parseIssueTestCommand,
   publishParentPullRequest,
   reviewParentPullRequest,
   runQueueExecution,
@@ -116,6 +118,65 @@ test("buildFinalParentSummary rolls up human QA guidance", () => {
   assert.match(summary, /Automated verification completed:/);
   assert.match(summary, /Human testing needed:/);
   assert.match(summary, /Hover the info icon and confirm tooltip copy/);
+});
+
+test("buildFinalTriggerTestingSummary lists how to test each completed task", () => {
+  const summary = buildFinalTriggerTestingSummary(
+    {
+      parent: {
+        identifier: "#129",
+        title: "Hover information",
+        branchName: "issue-129-hover-information",
+        comments: { nodes: [] },
+      },
+      children: [
+        {
+          identifier: "#135",
+          title: "Add hover tooltip",
+          state: { name: "Done" },
+        },
+      ],
+    },
+    [
+      {
+        child: { identifier: "#135", title: "Add hover tooltip" },
+        workerResult: {
+          outcome: "done",
+          summary: "Added tooltip.",
+          changes: ["Rendered the hover tooltip."],
+          tests: ["npm test -- tooltip"],
+          recoveryNotes: [],
+          humanTestingRequired: true,
+          humanTestingInstructions: [
+            "Open the portfolio page.",
+            "Hover the info icon and confirm tooltip copy.",
+          ],
+        },
+      },
+    ],
+  );
+
+  assert.match(summary, /Crosby completed #129/);
+  assert.match(summary, /Parent branch: issue-129-hover-information/);
+  assert.match(summary, /## #135 Add hover tooltip/);
+  assert.match(summary, /Rendered the hover tooltip/);
+  assert.match(summary, /npm test -- tooltip/);
+  assert.match(summary, /1\. Open the portfolio page/);
+  assert.match(summary, /2\. Hover the info icon/);
+});
+
+test("parseIssueTestCommand reads fenced and plain Test Command sections", () => {
+  assert.equal(
+    parseIssueTestCommand({
+      body: "## Test Command\n\n```bash\nnpm test -- tooltip\n```\n\n## Acceptance Criteria\n- [ ] Done",
+    }),
+    "npm test -- tooltip",
+  );
+  assert.equal(
+    parseIssueTestCommand({ body: "## Test Command\npytest tests/test_api.py" }),
+    "pytest tests/test_api.py",
+  );
+  assert.equal(parseIssueTestCommand({ body: "## Scope\nNone" }), null);
 });
 
 test("buildPiWorkerExtraArgs passes effort labels to pi as --thinking, not --effort", () => {
@@ -517,6 +578,159 @@ test("runQueueExecution downgrades done worker results to review when no new com
   assert.match(progressComment, /Status: Review/);
   assert.match(progressComment, /No new commit found on issue-129-symphony/);
   assert.match(progressComment, /commit the completed work/i);
+});
+
+test("runQueueExecution verifies and merges child branch before closing a child", async () => {
+  const calls = [];
+
+  const result = await runQueueExecution(
+    {
+      parent: {
+        identifier: "#129",
+        title: "Symphony",
+        branchName: "issue-129-symphony",
+        state: { name: "Execute", type: "started" },
+      },
+      children: [
+        {
+          identifier: "#135",
+          title: "Implement dashboard",
+          body: "## Test Command\nnode --test dashboard.test.mjs",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    {
+      moveIssue: async (issueKey, state) => calls.push(["moveIssue", issueKey, state]),
+      addComment: async (issueKey) => calls.push(["addComment", issueKey]),
+      ensureParentBranch: async () => calls.push(["ensureParentBranch"]),
+      prepareChildBranch: async () => {
+        calls.push(["prepareChildBranch"]);
+        return { name: "crosby/129/135-implement-dashboard", parentBranch: "issue-129-symphony" };
+      },
+      snapshotGitState: async ({ childBranch }) => {
+        calls.push(["snapshot", childBranch.name]);
+        return { available: true, branch: childBranch.name, head: "abc123" };
+      },
+      runWorker: async () => {
+        calls.push(["runWorker"]);
+        return {
+          stdout: JSON.stringify({
+            issueKey: "#135",
+            issueTitle: "Implement dashboard",
+            outcome: "done",
+            summary: "Completed.",
+            changes: ["Updated dashboard implementation"],
+            tests: ["node --test dashboard.test.mjs"],
+            humanTestingRequired: false,
+            humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
+          }),
+        };
+      },
+      hasCommittedWorkSince: async ({ expectedBranchName }) => {
+        calls.push(["verifyCommit", expectedBranchName]);
+        return { hasCommittedWork: true, diagnostic: "ok" };
+      },
+      runVerificationCommand: async ({ command }) => calls.push(["runVerification", command]),
+      mergeChildBranchIntoParent: async ({ childBranch }) =>
+        calls.push(["mergeChildBranch", childBranch.name]),
+      refreshQueue: async () => ({
+        parent: {
+          identifier: "#129",
+          title: "Symphony",
+          branchName: "issue-129-symphony",
+          state: { name: "Building", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#135",
+            title: "Implement dashboard",
+            state: { name: "Done", type: "completed" },
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(result.completedChildren[0].workerResult.outcome, "done");
+  assert.deepEqual(calls.slice(0, 9), [
+    ["ensureParentBranch"],
+    ["prepareChildBranch"],
+    ["moveIssue", "#135", "Building"],
+    ["snapshot", "crosby/129/135-implement-dashboard"],
+    ["runWorker"],
+    ["verifyCommit", "crosby/129/135-implement-dashboard"],
+    ["runVerification", "node --test dashboard.test.mjs"],
+    ["mergeChildBranch", "crosby/129/135-implement-dashboard"],
+    ["moveIssue", "#135", "Done"],
+  ]);
+});
+
+test("runQueueExecution moves child to review and does not merge when verification fails", async () => {
+  const calls = [];
+
+  const result = await runQueueExecution(
+    {
+      parent: {
+        identifier: "#129",
+        title: "Symphony",
+        branchName: "issue-129-symphony",
+        state: { name: "Execute", type: "started" },
+      },
+      children: [
+        {
+          identifier: "#135",
+          title: "Implement dashboard",
+          body: "## Test Command\nnode --test dashboard.test.mjs",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+        {
+          identifier: "#136",
+          title: "Next task",
+          state: { name: "Ready to Build", type: "unstarted" },
+        },
+      ],
+    },
+    {
+      moveIssue: async (issueKey, state) => calls.push(["moveIssue", issueKey, state]),
+      addComment: async (issueKey, body) => calls.push(["addComment", issueKey, body]),
+      prepareChildBranch: async () => ({ name: "crosby/129/135-implement-dashboard", parentBranch: "issue-129-symphony" }),
+      snapshotGitState: async () => ({ available: true, branch: "crosby/129/135-implement-dashboard", head: "abc123" }),
+      runWorker: async () => ({
+        stdout: JSON.stringify({
+          issueKey: "#135",
+          issueTitle: "Implement dashboard",
+          outcome: "done",
+          summary: "Completed.",
+          changes: ["Updated dashboard implementation"],
+          tests: ["node --test dashboard.test.mjs"],
+          humanTestingRequired: false,
+          humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
+        }),
+      }),
+      hasCommittedWorkSince: async () => ({ hasCommittedWork: true, diagnostic: "ok" }),
+      runVerificationCommand: async () => {
+        calls.push(["runVerification"]);
+        throw new Error("tests failed");
+      },
+      mergeChildBranchIntoParent: async () => calls.push(["mergeChildBranch"]),
+    },
+  );
+
+  assert.equal(result.completedChildren[0].workerResult.outcome, "review");
+  assert.deepEqual(
+    calls.filter((call) => call[0] === "moveIssue"),
+    [
+      ["moveIssue", "#135", "Building"],
+      ["moveIssue", "#135", "Review"],
+      ["moveIssue", "#129", "Review"],
+    ],
+  );
+  assert.equal(calls.some((call) => call[0] === "mergeChildBranch"), false);
+  assert.equal(calls.some((call) => call[1] === "#136"), false);
+  const progressComment = calls.find((call) => call[0] === "addComment")?.[2] ?? "";
+  assert.match(progressComment, /Status: Review/);
+  assert.match(progressComment, /Verification command failed/);
 });
 
 test("runQueueExecution closes done worker results when committed work is found", async () => {
