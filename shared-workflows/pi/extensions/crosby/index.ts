@@ -21,6 +21,7 @@ import {
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   fetchParentQueue,
+  mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -140,6 +141,12 @@ function normalizeIssueRef(issueRef: string | number | undefined | null) {
   return raw;
 }
 
+function formatIssueViewRef(issueRef: string | number | undefined | null) {
+  const raw = String(issueRef ?? "").trim();
+  if (/^https?:\/\/[^\s]+\/issues\/\d+(?:\b|$)/i.test(raw)) return raw;
+  return normalizeIssueRef(issueRef);
+}
+
 function formatIssueIdentifier(issue: any) {
   const number = issue?.number ?? normalizeIssueRef(issue?.identifier);
   return number ? `#${number}` : String(issue?.identifier ?? "UNKNOWN-ISSUE");
@@ -224,13 +231,41 @@ function deriveBranchName(issue: any) {
   return `issue-${number}${slug ? `-${slug}` : ""}`;
 }
 
+function formatParentContextForSession(queue: any) {
+  const parent = queue?.parent;
+  const labels = getIssueLabelNames(parent);
+  const milestone =
+    parent?.milestone?.title ?? parent?.milestone?.name ?? "none";
+  const children = Array.isArray(queue?.children) ? queue.children : [];
+  const body = String(parent?.body ?? "").trim();
+
+  return [
+    `Crosby parent context loaded: ${parent?.identifier ?? "unknown"} — ${parent?.title ?? "Untitled"}`,
+    "",
+    `URL: ${parent?.url ?? "unknown"}`,
+    `Status: ${parent?.state?.name ?? "unknown"}`,
+    `Milestone: ${milestone}`,
+    `Branch: ${parent?.branchName ?? "unknown"}`,
+    `Labels: ${labels.length ? labels.join(", ") : "none"}`,
+    "",
+    "Parent body:",
+    body || "(empty)",
+    "",
+    "Child queue:",
+    ...(children.length
+      ? children.map(
+          (child: any) =>
+            `- ${child.identifier} ${child.title} — ${child?.state?.name ?? "unknown"}`,
+        )
+      : ["- none"]),
+  ].join("\n");
+}
+
 function toCrosbyIssue(githubIssue: any, children: any[] = []) {
   const statusName = getStatusNameFromGitHubIssue(githubIssue);
   const parentIdentifier = parseParentIssueRef(githubIssue?.body);
-  const labels = (Array.isArray(githubIssue?.labels) ? githubIssue.labels : [])
-    .map((label: any) => ({
-      name: typeof label === "string" ? label : label?.name,
-    }))
+  const labels = getIssueLabelNames(githubIssue)
+    .map((name: string) => ({ name }))
     .filter((label: any) => label.name);
 
   return {
@@ -324,20 +359,58 @@ async function execGhJson(
   );
 }
 
+async function loadNativeSubIssuesFromGitHub(pi: ExtensionAPI, issue: any) {
+  if (!issue?.id) return [];
+
+  const result = await execGhJson(
+    pi,
+    [
+      "api",
+      "graphql",
+      "-f",
+      `query=query($issueId: ID!) {
+        node(id: $issueId) {
+          ... on Issue {
+            subIssues(first: 100) {
+              nodes {
+                number
+                title
+                body
+                state
+                labels(first: 100) { nodes { name } }
+                milestone { title }
+                url
+                comments(first: 100) { nodes { body } }
+              }
+            }
+          }
+        }
+      }`,
+      "-f",
+      `issueId=${issue.id}`,
+    ],
+    `Failed to load native GitHub sub-issues for ${formatIssueIdentifier(issue)}`,
+  );
+
+  return Array.isArray(result?.data?.node?.subIssues?.nodes)
+    ? result.data.node.subIssues.nodes
+    : [];
+}
+
 async function loadIssueFromGitHub(
   pi: ExtensionAPI,
   issueRef: string | number,
   options: { includeChildren?: boolean } = {},
 ) {
-  const normalizedRef = normalizeIssueRef(issueRef);
+  const issueViewRef = formatIssueViewRef(issueRef);
   const issue = await execGhJson(
     pi,
     [
       "issue",
       "view",
-      normalizedRef,
+      issueViewRef,
       "--json",
-      "number,title,body,state,labels,milestone,url,comments",
+      "id,number,title,body,state,labels,milestone,url,comments",
     ],
     `Failed to load GitHub issue ${issueRef}`,
   );
@@ -347,10 +420,19 @@ async function loadIssueFromGitHub(
     const childRefs = parseChildIssueRefs(issue?.body).filter(
       (ref) => ref !== String(issue?.number),
     );
-    children = await Promise.all(
+    const checklistChildren = await Promise.all(
       childRefs.map((ref) =>
         loadIssueFromGitHub(pi, ref, { includeChildren: false }),
       ),
+    );
+    const nativeChildren = (await loadNativeSubIssuesFromGitHub(pi, issue)).map(
+      (child) => toCrosbyIssue(child, []),
+    );
+
+    children = mergeChecklistAndNativeIssueChildren(
+      checklistChildren,
+      nativeChildren,
+      issue?.number,
     );
   }
 
@@ -1449,6 +1531,12 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                   void openCrosbyDashboardPane(pi, dashboardController);
                 }
               },
+              onQueueSelected: (queue) => {
+                pi.appendEntry(
+                  "crosby-parent-context",
+                  formatParentContextForSession(queue),
+                );
+              },
               onExecutionStart: (event) => {
                 dashboardController?.executionStarted(event);
                 const pathText = formatIssuePath(event.path);
@@ -1475,6 +1563,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
               },
               onExecutionFinalized: (event) => {
                 dashboardController?.executionFinalized(event);
+              },
+              onParentFinalized: ({ finalSummary }) => {
+                pi.appendEntry("crosby-final-human-summary", finalSummary);
               },
               onQueueRefreshed: (queue) => {
                 dashboardController?.queueRefreshed(queue);
@@ -1573,6 +1664,11 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           return;
         }
 
+        pi.appendEntry(
+          "crosby-parent-context",
+          formatParentContextForSession(queue),
+        );
+
         dashboardController = createCrosbyDashboardController(
           ctx,
           queue,
@@ -1630,6 +1726,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           },
           onExecutionFinalized: (event) => {
             dashboardController?.executionFinalized(event);
+          },
+          onParentFinalized: ({ finalSummary }) => {
+            pi.appendEntry("crosby-final-human-summary", finalSummary);
           },
           onQueueRefreshed: (refreshedQueue) => {
             dashboardController?.queueRefreshed(refreshedQueue);

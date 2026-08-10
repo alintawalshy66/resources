@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildFinalParentSummary,
+  buildParentProgressComment,
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   buildRalphLoopPrompt,
@@ -9,6 +11,7 @@ import {
   extractModelOverride,
   formatLifecycleFinishedEvent,
   formatLifecycleStartedEvent,
+  mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -55,6 +58,64 @@ test("buildRalphLoopPrompt requires commit postconditions before done results", 
   assert.match(prompt, /changes\[\]/i);
   assert.match(prompt, /return outcome review/i);
   assert.match(prompt, /requiredHumanAction/i);
+  assert.match(prompt, /humanTestingRequired/i);
+  assert.match(prompt, /humanTestingInstructions/i);
+});
+
+test("buildParentProgressComment includes human testing handoff", () => {
+  const comment = buildParentProgressComment({
+    child: { identifier: "#135", title: "Add hover tooltip" },
+    workerResult: {
+      outcome: "done",
+      summary: "Added the tooltip.",
+      changes: ["Rendered the info icon tooltip."],
+      tests: ["npm test -- tooltip"],
+      recoveryNotes: [],
+      humanTestingRequired: true,
+      humanTestingInstructions: [
+        "Open the portfolio page and hover the info icon.",
+        "Confirm the tooltip explains the metric.",
+      ],
+    },
+  });
+
+  assert.match(comment, /Human testing required: Yes/);
+  assert.match(comment, /Open the portfolio page and hover the info icon/);
+});
+
+test("buildFinalParentSummary rolls up human QA guidance", () => {
+  const summary = buildFinalParentSummary(
+    {
+      parent: { identifier: "#129", title: "Hover information", comments: { nodes: [] } },
+      children: [
+        {
+          identifier: "#135",
+          title: "Add hover tooltip",
+          state: { name: "Done" },
+        },
+      ],
+    },
+    [
+      {
+        child: { identifier: "#135", title: "Add hover tooltip" },
+        workerResult: {
+          outcome: "done",
+          summary: "Added the tooltip.",
+          changes: ["Rendered the info icon tooltip."],
+          tests: ["npm test -- tooltip"],
+          recoveryNotes: [],
+          humanTestingRequired: true,
+          humanTestingInstructions: ["Hover the info icon and confirm tooltip copy."],
+        },
+      },
+    ],
+  );
+
+  assert.match(summary, /Human QA summary:/);
+  assert.match(summary, /What was built:/);
+  assert.match(summary, /Automated verification completed:/);
+  assert.match(summary, /Human testing needed:/);
+  assert.match(summary, /Hover the info icon and confirm tooltip copy/);
 });
 
 test("buildPiWorkerExtraArgs passes effort labels to pi as --thinking, not --effort", () => {
@@ -71,6 +132,43 @@ test("buildPiWorkerExtraArgs passes effort labels to pi as --thinking, not --eff
   assert.deepEqual(buildPiWorkerExtraArgs({ model: "gpt-5.5" }), ["--model", "gpt-5.5"]);
   assert.deepEqual(buildPiWorkerExtraArgs({}), []);
   assert.deepEqual(buildPiWorkerExtraArgs(), []);
+});
+
+test("mergeChecklistAndNativeIssueChildren keeps native sub-issues when the parent body has no child checklist", () => {
+  const children = mergeChecklistAndNativeIssueChildren(
+    [],
+    [
+      {
+        identifier: "#194",
+        number: 194,
+        title: "Native sub-issue",
+        state: { name: "Ready to Build" },
+      },
+    ],
+    190,
+  );
+
+  assert.deepEqual(
+    children.map((child) => child.identifier),
+    ["#194"],
+  );
+});
+
+test("mergeChecklistAndNativeIssueChildren preserves checklist order and deduplicates native sub-issues", () => {
+  const children = mergeChecklistAndNativeIssueChildren(
+    [{ identifier: "#194", number: 194, title: "Checklist child" }],
+    [
+      { identifier: "#194", number: 194, title: "Duplicate native child" },
+      { identifier: "#190", number: 190, title: "Parent self reference" },
+      { identifier: "#202", number: 202, title: "Native-only child" },
+    ],
+    190,
+  );
+
+  assert.deepEqual(
+    children.map((child) => child.identifier),
+    ["#194", "#202"],
+  );
 });
 
 test("runWatchCycle keeps fatal worker issues in Build and does not move them to review", async () => {
@@ -101,6 +199,8 @@ test("runWatchCycle keeps fatal worker issues in Build and does not move them to
         summary: "Worker failed safely.",
         changes: ["Logged the failure"],
         tests: ["Simulated worker failure"],
+        humanTestingRequired: false,
+        humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
         requiredHumanAction: "Inspect the worker failure.",
         recoveryNotes: ["Fix the worker, then rerun watch mode."],
       }),
@@ -110,6 +210,74 @@ test("runWatchCycle keeps fatal worker issues in Build and does not move them to
   assert.equal(result.status, "fatal");
   assert.deepEqual(moved, [["#135", "Building"]]);
   assert.equal(result.workerResult.outcome, "fatal");
+});
+
+test("runWatchCycle reports selected queue only when a runnable child will execute", async () => {
+  const selectedQueues = [];
+  const result = await runWatchCycle({
+    fetchExecuteParentQueues: async () => [
+      {
+        parent: {
+          identifier: "#129",
+          title: "Symphony",
+          state: { name: "Execute", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#135",
+            title: "Runnable child",
+            state: { name: "Ready to Build", type: "unstarted" },
+          },
+        ],
+      },
+    ],
+    onQueueSelected: async (queue) => selectedQueues.push(queue),
+    moveIssue: async () => {},
+    runWorker: async () => ({
+      stdout: JSON.stringify({
+        issueKey: "#135",
+        issueTitle: "Runnable child",
+        outcome: "fatal",
+        summary: "Stopped after selection.",
+        changes: [],
+        tests: [],
+        humanTestingRequired: false,
+        humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
+        requiredHumanAction: "Inspect.",
+        recoveryNotes: ["Retry."],
+      }),
+    }),
+  });
+
+  assert.equal(result.status, "fatal");
+  assert.equal(selectedQueues.length, 1);
+  assert.equal(selectedQueues[0].parent.identifier, "#129");
+});
+
+test("runWatchCycle does not report selected queue when children are not runnable", async () => {
+  const selectedQueues = [];
+  const result = await runWatchCycle({
+    fetchExecuteParentQueues: async () => [
+      {
+        parent: {
+          identifier: "#129",
+          title: "Symphony",
+          state: { name: "Execute", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#135",
+            title: "Review child",
+            state: { name: "Review", type: "review" },
+          },
+        ],
+      },
+    ],
+    onQueueSelected: async (queue) => selectedQueues.push(queue),
+  });
+
+  assert.equal(result.status, "idle");
+  assert.equal(selectedQueues.length, 0);
 });
 
 test("runWatchCycle reports refreshed queues before skipping non-runnable children", async () => {
@@ -209,6 +377,8 @@ test("runWatchMode continues polling after a fatal worker result", async () => {
                 summary: "Worker failed safely.",
                 changes: ["Logged the failure"],
                 tests: ["Simulated worker failure"],
+                humanTestingRequired: false,
+                humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
                 requiredHumanAction: "Inspect the worker failure.",
                 recoveryNotes: ["Fix the worker, then rerun watch mode."],
               }
@@ -219,6 +389,8 @@ test("runWatchMode continues polling after a fatal worker result", async () => {
                 summary: "Worker succeeded.",
                 changes: ["Completed the issue"],
                 tests: ["Simulated worker success"],
+                humanTestingRequired: false,
+                humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
               },
         ),
       }),
@@ -309,6 +481,8 @@ test("runQueueExecution downgrades done worker results to review when no new com
             summary: "Completed.",
             changes: ["Updated dashboard implementation"],
             tests: ["node --test"],
+            humanTestingRequired: false,
+            humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
           }),
         };
       },
@@ -390,6 +564,8 @@ test("runQueueExecution closes done worker results when committed work is found"
             summary: "Completed.",
             changes: ["Updated dashboard implementation"],
             tests: ["node --test"],
+            humanTestingRequired: false,
+            humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
           }),
         };
       },
@@ -455,6 +631,8 @@ test("runQueueExecution emits finalized and refreshed callbacks after each child
           summary: "Completed.",
           changes: ["Added dashboard"],
           tests: ["node --test"],
+          humanTestingRequired: false,
+          humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
         }),
       }),
       refreshQueue: async () => {
@@ -490,6 +668,9 @@ test("runQueueExecution emits finalized and refreshed callbacks after each child
           queue.children[0].state.name,
         ]);
       },
+      onParentFinalized: async ({ finalSummary }) => {
+        calls.push(["parentFinalized", /Human QA summary/.test(finalSummary)]);
+      },
     },
   );
 
@@ -503,6 +684,7 @@ test("runQueueExecution emits finalized and refreshed callbacks after each child
     ["queueRefreshed", "#129", "Done"],
     ["addComment", "#129"],
     ["moveIssue", "#129", "Review"],
+    ["parentFinalized", true],
   ]);
 });
 
@@ -614,6 +796,8 @@ test("reviewParentPullRequest comments when Claude review fails", async () => {
           summary: "Completed.",
           changes: ["Added resilience handling"],
           tests: ["node --test lib-v2.test.mjs"],
+          humanTestingRequired: false,
+          humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
           recoveryNotes: [],
         },
       },
@@ -811,6 +995,8 @@ test("runWatchCycle forwards model and effort labels into runWorker", async () =
           summary: "Completed",
           changes: [],
           tests: [],
+          humanTestingRequired: false,
+          humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
           requiredHumanAction: "",
           recoveryNotes: [],
         }),
@@ -858,6 +1044,8 @@ test("runWatchCycle passes null model and effort when labels are absent", async 
           summary: "Completed",
           changes: [],
           tests: [],
+          humanTestingRequired: false,
+          humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
           requiredHumanAction: "",
           recoveryNotes: [],
         }),
