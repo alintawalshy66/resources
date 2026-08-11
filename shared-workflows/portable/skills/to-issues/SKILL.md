@@ -65,13 +65,21 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
   - `## Test Command` — the narrowest useful verification command.
   - `## Crosby Locks` — advisory file/directory/domain locks used to avoid launching conflicting children in parallel.
 - If an AFK issue is too vague to name expected files, tests, and locks, mark it HITL or split/add an investigation issue first.
-- Only add worker override labels when there is a concrete reason to override Crosby/Pi defaults.
-- When adding a model override, use a provider-qualified label: `model:<provider>/<model-id>`.
-  - Good: `model:github-copilot/gpt-5.5`
-  - Good: `model:github-copilot/claude-opus-4.7`
-  - Avoid bare model labels like `model:gpt-5.5`; Pi can resolve them to an unavailable provider.
-- When adding an effort override, use `effort:<thinking-level>` where `<thinking-level>` is one of Pi's supported thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
-- If a model override is proposed, verify or ask the user to verify it before issue creation with:
+- Every AFK/buildable issue must include both:
+  - a provider-qualified model label: `model:<provider>/<model-id>`
+  - an effort/thinking label: `effort:<thinking-level>`
+- Use provider-qualified model labels only; never use bare model names.
+- Default model routing:
+  - Backend/API/data/persistence/infrastructure work → `model:github-copilot/gpt-5.5`
+  - Frontend/UI/component/interaction/design-system work → `model:github-copilot/claude-opus-4.7`
+  - Full-stack issues should be split when practical so backend and frontend work can receive the correct model routing.
+  - If a full-stack issue cannot be split, choose the model based on the riskiest or largest part of the work and call out the reason in the proposed labels.
+- Every AFK/buildable issue must include an `effort:<thinking-level>` label where `<thinking-level>` is one of Pi's supported thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+  - Use `effort:low` for mechanical, tightly scoped changes.
+  - Use `effort:medium` for normal implementation with some design judgement.
+  - Use `effort:high` or above for architecture, security, migrations, concurrency, or broad cross-module work.
+- HITL/manual issues may omit model labels unless a worker is expected to execute code, but should still include an effort label when the issue will guide later implementation.
+- If a model label is proposed, verify or ask the user to verify it before issue creation with:
 
   ```bash
   pi --model <provider>/<model-id> --thinking <level> -p 'Reply OK'
@@ -126,16 +134,19 @@ Use `gh issue create` for each child. Each created child should include:
   - AFK/buildable issues: `mode:afk`, `status:ready-to-build`
   - HITL/manual issues: `mode:hitl`, `status:ready` or `status:review`
   - work type: `wt:development` or `wt:process-automation`
-  - optional worker routing labels only when justified:
-    - `model:<provider>/<model-id>` for provider-qualified model selection, e.g. `model:github-copilot/gpt-5.5`
+  - required worker routing labels for AFK/buildable issues:
+    - `model:github-copilot/gpt-5.5` for backend/API/data/persistence/infrastructure work
+    - `model:github-copilot/claude-opus-4.7` for frontend/UI/component/interaction/design-system work
     - `effort:<thinking-level>` for Pi thinking level, where thinking level is `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`
 
-Default effort guidance:
+Required worker routing guidance for AFK/buildable issues:
 
-- Do not add `model:*` when the repo/Crosby/Pi default model is appropriate.
-- Do not add `effort:*` when the repo/Crosby/Pi default thinking level is appropriate.
+- Always include a provider-qualified `model:*` label and an `effort:*` label.
 - Always include the provider in model labels: `model:<provider>/<model-id>`.
 - Never use bare model labels such as `model:gpt-5.5` or `model:claude-opus-4.7`.
+- Use `model:github-copilot/gpt-5.5` for backend/API/data/persistence/infrastructure work.
+- Use `model:github-copilot/claude-opus-4.7` for frontend/UI/component/interaction/design-system work.
+- Split full-stack work when practical so backend and frontend issues can receive the correct model routing.
 - Use `effort:low` for mechanical, tightly scoped changes.
 - Use `effort:medium` for normal implementation with some design judgement.
 - Reserve `effort:high`+ for high-risk architecture, security, data migration, concurrency, or broad cross-module work.
@@ -147,7 +158,7 @@ Example:
 gh issue create \
   --title "Add backend validation" \
   --body "Parent: #122\n\n## Scope\n...\n\n## Expected Files\n- backend/app/validation.py\n- backend/app/tests/test_validation.py\n\n## Do Not Touch\n- frontend/\n- migrations/\n\n## Crosby Locks\n- backend/app/validation.py\n\n## Test Command\npytest backend/app/tests/test_validation.py\n\n## Acceptance Criteria\n- [ ] ..." \
-  --label "type:child,status:ready-to-build,mode:afk,wt:development" \
+  --label "type:child,status:ready-to-build,mode:afk,wt:development,model:github-copilot/gpt-5.5,effort:medium" \
   --milestone "my-feature"
 ```
 
@@ -192,7 +203,7 @@ Use a numbered list where each proposed child issue includes:
 - Crosby locks (AFK required)
 - Test command (AFK required)
 - Acceptance criteria
-- Proposed labels, including any justified provider-qualified `model:<provider>/<model-id>` or `effort:<thinking-level>` override
+- Proposed labels, including required provider-qualified `model:<provider>/<model-id>` and `effort:<thinking-level>` labels for AFK/buildable issues
 
 After approval and creation, also report:
 
@@ -212,7 +223,7 @@ After approval and creation, also report:
 - Would the issue list support incremental delivery?
 - Is each AFK/buildable issue parallel-ready with expected files, do-not-touch boundaries, a narrow test command, and Crosby locks?
 - Are vague or discovery-heavy items marked HITL or split into investigation-first issues instead of AFK parallel work?
-- Are `model:*` and `effort:*` labels used only when the task justifies overriding defaults, and are model overrides provider-qualified such as `model:github-copilot/gpt-5.5`?
+- Does every AFK/buildable issue include provider-qualified `model:*` and `effort:*` labels, with backend work routed to `model:github-copilot/gpt-5.5` and frontend work routed to `model:github-copilot/claude-opus-4.7`?
 - Are the local planning artifacts still aligned with the approved issue breakdown?
 - Has explicit user approval been captured before GitHub issue creation?
 - If no parent existed, is the proposed parent clear, labeled `type:parent`, assigned an appropriate status/work-type/routing label set, and approved before creation?
