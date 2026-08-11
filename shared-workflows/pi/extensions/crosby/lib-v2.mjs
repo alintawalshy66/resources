@@ -72,6 +72,38 @@ export function formatLifecycleFinishedEvent(issueOrKey, outcome) {
   return `${identifier} finished ${outcome}`;
 }
 
+function getIssueNumberKey(issue) {
+  const number = issue?.number ?? String(issue?.identifier ?? "").match(/\d+/)?.[0];
+  return number === undefined || number === null || String(number).length === 0
+    ? null
+    : String(number);
+}
+
+export function mergeChecklistAndNativeIssueChildren(
+  checklistChildren,
+  nativeChildren,
+  parentNumber,
+) {
+  const merged = Array.isArray(checklistChildren) ? [...checklistChildren] : [];
+  const seenChildNumbers = new Set(
+    merged.map(getIssueNumberKey).filter(Boolean),
+  );
+  const parentNumberKey =
+    parentNumber === undefined || parentNumber === null
+      ? null
+      : String(parentNumber);
+
+  for (const child of Array.isArray(nativeChildren) ? nativeChildren : []) {
+    const childNumber = getIssueNumberKey(child);
+    if (!childNumber || childNumber === parentNumberKey) continue;
+    if (seenChildNumbers.has(childNumber)) continue;
+    seenChildNumbers.add(childNumber);
+    merged.push(child);
+  }
+
+  return merged;
+}
+
 export function loadParentQueueFromIssue(issue) {
   const children = Array.isArray(issue?.children) ? issue.children : [];
 
@@ -179,6 +211,71 @@ export function buildPiWorkerSessionName(issueKey) {
     .replace(/^-+|-+$/g, "")
     .slice(0, 40);
   return slug ? `crosby-${slug}` : "crosby-worker";
+}
+
+export function findExistingCrosbyDashboardPane(panes, options = {}) {
+  const currentTabId = String(options.tabId ?? "").trim();
+  const currentWorkspaceId = String(options.workspaceId ?? "").trim();
+  const candidates = (Array.isArray(panes) ? panes : []).filter((pane) => {
+    const label = String(pane?.label ?? "").trim().toLowerCase();
+    const title = String(
+      pane?.terminal_title_stripped ?? pane?.terminal_title ?? "",
+    ).trim().toLowerCase();
+    const matchesDashboard =
+      label === "crosby dashboard" || title.includes("crosby dashboard");
+    if (!matchesDashboard) return false;
+    if (currentTabId && pane?.tab_id !== currentTabId) return false;
+    if (!currentTabId && currentWorkspaceId && pane?.workspace_id !== currentWorkspaceId) {
+      return false;
+    }
+    return Boolean(pane?.pane_id);
+  });
+
+  if (candidates.length === 0) return null;
+  candidates.sort(
+    (a, b) => Number(b?.revision ?? 0) - Number(a?.revision ?? 0),
+  );
+  return candidates[0];
+}
+
+export function findExistingCrosbyWorkerAgent(agents, issueKey, cwd) {
+  const issueNumber = String(issueKey ?? "").match(/\d+/)?.[0];
+  if (!issueNumber) return null;
+
+  const sessionName = buildPiWorkerSessionName(issueKey);
+  const expectedNamePrefix = `crosby-${issueNumber}-`;
+  const expectedTitlePattern = new RegExp(
+    `(?:^|\\s-\\s)${sessionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s-\\s|$)`,
+  );
+  const expectedCwd = String(cwd ?? "").trim();
+  const candidates = (Array.isArray(agents) ? agents : []).filter((agent) => {
+    if (agent?.agent !== "pi") return false;
+
+    const name = String(agent?.name ?? "");
+    const title = String(
+      agent?.terminal_title_stripped ?? agent?.terminal_title ?? "",
+    );
+    const matchesIssue =
+      name.startsWith(expectedNamePrefix) || expectedTitlePattern.test(title);
+    if (!matchesIssue) return false;
+
+    if (!expectedCwd) return true;
+    return [agent?.cwd, agent?.foreground_cwd]
+      .map((value) => String(value ?? "").trim())
+      .includes(expectedCwd);
+  });
+
+  if (candidates.length === 0) return null;
+
+  const readyStates = new Set(["idle", "done", "blocked"]);
+  candidates.sort((a, b) => {
+    const aReady = readyStates.has(String(a?.agent_status ?? ""));
+    const bReady = readyStates.has(String(b?.agent_status ?? ""));
+    if (aReady !== bReady) return aReady ? -1 : 1;
+    return Number(b?.state_change_seq ?? 0) - Number(a?.state_change_seq ?? 0);
+  });
+
+  return candidates[0];
 }
 
 export function resolveIssueWorkingDirectory(issue, options = {}) {
@@ -381,6 +478,17 @@ function buildWorkerCommitProtocol(issueReference) {
   ];
 }
 
+function buildHumanTestingPromptInstructions() {
+  return [
+    "- Crosby has checked out an isolated child work branch for this issue. Commit all work on the current branch only; do not switch branches, merge, push, or close issues yourself.",
+    "- Crosby will run postcondition checks and merge this child branch into the parent branch after successful verification.",
+    "- Always include humanTestingRequired and humanTestingInstructions in the returned JSON.",
+    "- Set humanTestingRequired to true when a human should manually verify UI/product behavior, integration behavior, or any risk not fully covered by automated tests.",
+    "- Set humanTestingRequired to false only when automated verification and code review are sufficient.",
+    "- humanTestingInstructions must explain where and how to test, including page/flow/control and expected result when applicable. If none is needed, use ['No targeted human testing required beyond normal code review.'].",
+  ];
+}
+
 export function buildRalphLoopPrompt(child) {
   const issueKey = child?.identifier ?? "UNKNOWN-ISSUE";
   const serializedChild = JSON.stringify(child, null, 2);
@@ -402,13 +510,14 @@ export function buildRalphLoopPrompt(child) {
       "- Move the executable leaf issue through status:building and close it when complete, or move it to status:review if human action is required.",
       `- When all direct children of ${issueKey} are closed, return outcome done for ${issueKey}. If runnable children remain, continue within this worker until the ${issueKey} child queue is exhausted or human action is required.`,
       ...buildWorkerCommitProtocol("the executable leaf issue key"),
+      ...buildHumanTestingPromptInstructions(),
       "- A preloaded issue snapshot is included below so you have immediate context even before refreshing.",
       "",
       "Preloaded issue snapshot:",
       serializedChild,
       "",
       "Return JSON only with this schema for the container issue:",
-      '{"issueKey":"ISSUE-KEY","issueTitle":"Issue title","outcome":"done|review|fatal","summary":"Concise summary","changes":["key change"],"tests":["test or verification run"],"requiredHumanAction":"Required for review/fatal outcomes","recoveryNotes":["Required for review/fatal outcomes"]}',
+      '{"issueKey":"ISSUE-KEY","issueTitle":"Issue title","outcome":"done|review|fatal","summary":"Concise summary","changes":["key change"],"tests":["test or verification run"],"humanTestingRequired":true,"humanTestingInstructions":["where/how a human should verify the work, or No targeted human testing required beyond normal code review."],"requiredHumanAction":"Required for review/fatal outcomes","recoveryNotes":["Required for review/fatal outcomes"]}',
     ].join("\n");
   }
 
@@ -424,13 +533,14 @@ export function buildRalphLoopPrompt(child) {
     "- Only if the refreshed issue has no children, execute it as a leaf issue using ralph-loop/TDD discipline.",
     "- If Crosby already moved this issue to status:building before launching this worker, treat that as an explicit resume and proceed; do not fail solely because the current state is status:building.",
     ...buildWorkerCommitProtocol(issueKey),
+    ...buildHumanTestingPromptInstructions(),
     "- A preloaded issue snapshot is included below so you have immediate context even before refreshing.",
     "",
     "Preloaded issue snapshot:",
     serializedChild,
     "",
     "Return JSON only with this schema:",
-    '{"issueKey":"ISSUE-KEY","issueTitle":"Issue title","outcome":"done|review|fatal","summary":"Concise summary","changes":["key change"],"tests":["test or verification run"],"requiredHumanAction":"Required for review/fatal outcomes","recoveryNotes":["Required for review/fatal outcomes"]}',
+    '{"issueKey":"ISSUE-KEY","issueTitle":"Issue title","outcome":"done|review|fatal","summary":"Concise summary","changes":["key change"],"tests":["test or verification run"],"humanTestingRequired":true,"humanTestingInstructions":["where/how a human should verify the work, or No targeted human testing required beyond normal code review."],"requiredHumanAction":"Required for review/fatal outcomes","recoveryNotes":["Required for review/fatal outcomes"]}',
   ].join("\n");
 }
 
@@ -440,10 +550,28 @@ function formatBulletList(entries, fallback = "- None.") {
     : fallback;
 }
 
+function formatNumberedList(entries, fallback = "1. No targeted human testing instructions captured; perform normal acceptance review.") {
+  return Array.isArray(entries) && entries.length > 0
+    ? entries.map((entry, index) => `${index + 1}. ${entry}`).join("\n")
+    : fallback;
+}
+
 function getOutcomeStateLabel(outcome) {
   if (outcome === "done") return "Done";
   if (outcome === "review") return "Review";
   return "Fatal";
+}
+
+function formatHumanTestingRequired(required) {
+  return required ? "Yes" : "No";
+}
+
+function getHumanTestingInstructions(source) {
+  return Array.isArray(source?.humanTestingInstructions)
+    ? source.humanTestingInstructions.filter(
+        (entry) => typeof entry === "string" && entry.trim().length > 0,
+      )
+    : [];
 }
 
 export function buildParentProgressComment(execution) {
@@ -470,7 +598,25 @@ export function buildParentProgressComment(execution) {
     "",
     "Follow-up notes / risks:",
     formatBulletList(followUpNotes),
+    "",
+    `Human testing required: ${formatHumanTestingRequired(Boolean(execution.workerResult.humanTestingRequired))}`,
+    "",
+    "Human testing instructions:",
+    formatBulletList(getHumanTestingInstructions(execution.workerResult)),
   ].join("\n");
+}
+
+export function parseIssueTestCommand(issue) {
+  const text = String(issue?.body ?? issue?.description ?? "");
+  const sectionMatch = text.match(
+    /(?:^|\n)##\s+Test Command\s*\n([\s\S]*?)(?=\n##\s+|$)/i,
+  );
+  if (!sectionMatch) return null;
+
+  let command = sectionMatch[1].trim();
+  const fencedMatch = command.match(/^```(?:\w+)?\s*\n([\s\S]*?)\n```\s*$/);
+  if (fencedMatch) command = fencedMatch[1].trim();
+  return command.length > 0 ? command : null;
 }
 
 function collectSectionBullets(lines, headingPattern) {
@@ -498,6 +644,17 @@ function summarizeChildFromExistingProgressComment(child, commentBody) {
   const statusLine = lines.find((line) => /^Status:/i.test(line.trim()));
   const summaryLine = lines.find((line) => /^Summary:/i.test(line.trim()));
 
+  const humanTestingRequiredLine = lines.find((line) =>
+    /^Human testing required:/i.test(line.trim()),
+  );
+  const humanTestingRequired = humanTestingRequiredLine
+    ? /:\s*(yes|true|required)\b/i.test(humanTestingRequiredLine)
+    : false;
+  const humanTestingInstructions = collectSectionBullets(
+    lines,
+    /^Human testing instructions:/i,
+  );
+
   return {
     identifier: child.identifier,
     title: child.title,
@@ -513,6 +670,8 @@ function summarizeChildFromExistingProgressComment(child, commentBody) {
       /^Tests(?:\/verifications(?: run)?)?:/i,
     ),
     followUp: collectSectionBullets(lines, /^Follow-up notes(?: \/ risks)?:/i),
+    humanTestingRequired,
+    humanTestingInstructions,
   };
 }
 
@@ -540,6 +699,8 @@ function summarizeChildForFinalComment(
               ...(workerResult.recoveryNotes ?? []),
             ]
           : (workerResult.recoveryNotes ?? []),
+      humanTestingRequired: Boolean(workerResult.humanTestingRequired),
+      humanTestingInstructions: getHumanTestingInstructions(workerResult),
     };
   }
 
@@ -561,16 +722,89 @@ function areAllChildrenDone(children) {
   );
 }
 
-export function buildFinalParentSummary(queue, completedChildren = []) {
+function buildHumanQaSummary(completedSummaries) {
+  const builtLines = completedSummaries.flatMap((summary) => {
+    const changes = Array.isArray(summary.changes) ? summary.changes : [];
+    if (changes.length === 0) {
+      return [`${summary.identifier} — ${summary.summary}`];
+    }
+    return changes.map((change) => `${summary.identifier} — ${change}`);
+  });
+  const verificationLines = [
+    ...new Set(
+      completedSummaries.flatMap((summary) => summary.tests).filter(Boolean),
+    ),
+  ];
+  const humanTestingSummaries = completedSummaries.filter(
+    (summary) => summary.humanTestingRequired,
+  );
+
+  return [
+    "Human QA summary:",
+    "",
+    "What was built:",
+    formatBulletList(builtLines),
+    "",
+    "Automated verification completed:",
+    formatBulletList(verificationLines),
+    "",
+    "Human testing needed:",
+    ...(humanTestingSummaries.length > 0
+      ? humanTestingSummaries.flatMap((summary) => [
+          `- ${summary.identifier} — ${summary.title}`,
+          ...formatBulletList(
+            summary.humanTestingInstructions,
+            "- No targeted human testing instructions captured; perform normal acceptance review for this issue.",
+          )
+            .split("\n")
+            .map((line) => `  ${line}`),
+        ])
+      : ["- No targeted human testing required beyond normal code review."]),
+  ];
+}
+
+function getCompletedSummaries(queue, completedChildren = []) {
   const parentComments = queue?.parent?.comments?.nodes ?? [];
-  const completedSummaries = (
-    Array.isArray(queue?.children) ? queue.children : []
-  )
+  return (Array.isArray(queue?.children) ? queue.children : [])
     .filter((child) => child?.state?.name === "Done")
     .sort(compareIssueKeys)
     .map((child) =>
       summarizeChildForFinalComment(child, completedChildren, parentComments),
     );
+}
+
+export function buildFinalTriggerTestingSummary(queue, completedChildren = []) {
+  const completedSummaries = getCompletedSummaries(queue, completedChildren);
+
+  return [
+    `Crosby completed ${queue.parent.identifier} — ${queue.parent.title}`,
+    "",
+    `Parent branch: ${queue.parent.branchName ?? "unknown"}`,
+    "",
+    "How to test completed work:",
+    "",
+    ...completedSummaries.flatMap((summary) => [
+      `## ${summary.identifier} ${summary.title}`,
+      "",
+      "What changed:",
+      formatBulletList(
+        summary.changes.length > 0 ? summary.changes : [summary.summary],
+      ),
+      "",
+      "Automated verification:",
+      formatBulletList(summary.tests),
+      "",
+      "Human testing:",
+      summary.humanTestingRequired
+        ? formatNumberedList(summary.humanTestingInstructions)
+        : "- No targeted human testing required beyond normal code review.",
+      "",
+    ]),
+  ].join("\n");
+}
+
+export function buildFinalParentSummary(queue, completedChildren = []) {
+  const completedSummaries = getCompletedSummaries(queue, completedChildren);
 
   const verificationLines = [
     ...new Set(
@@ -586,6 +820,8 @@ export function buildFinalParentSummary(queue, completedChildren = []) {
   return [
     `${queue.parent.identifier} — ${queue.parent.title} final summary`,
     "",
+    ...buildHumanQaSummary(completedSummaries),
+    "",
     "Completed child outcomes:",
     ...completedSummaries.flatMap((summary) => [
       `- ${summary.identifier} — ${summary.title} (${summary.status})`,
@@ -593,6 +829,8 @@ export function buildFinalParentSummary(queue, completedChildren = []) {
       `  Key changes: ${summary.changes.length > 0 ? summary.changes.join("; ") : "See earlier parent progress comment."}`,
       `  Tests/verifications: ${summary.tests.length > 0 ? summary.tests.join("; ") : "See earlier parent progress comment."}`,
       `  Follow-up notes: ${summary.followUp.length > 0 ? summary.followUp.join("; ") : "None."}`,
+      `  Human testing required: ${formatHumanTestingRequired(Boolean(summary.humanTestingRequired))}`,
+      `  Human testing instructions: ${summary.humanTestingInstructions.length > 0 ? summary.humanTestingInstructions.join("; ") : "No targeted human testing required beyond normal code review."}`,
     ]),
     "",
     "Verification rollup:",
@@ -976,6 +1214,10 @@ async function finalizeParentIfComplete(queue, completedChildren, operations) {
   }
 
   const finalSummary = buildFinalParentSummary(queue, completedChildren);
+  const testingSummary = buildFinalTriggerTestingSummary(
+    queue,
+    completedChildren,
+  );
 
   try {
     await operations.addComment(queue.parent.identifier, finalSummary);
@@ -991,6 +1233,15 @@ async function finalizeParentIfComplete(queue, completedChildren, operations) {
     throw new Error(
       `Failed to move parent issue ${queue.parent.identifier} to Review after all children closed. Recovery: move the parent to Review after confirming the final summary comment, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+
+  if (typeof operations.onParentFinalized === "function") {
+    await operations.onParentFinalized({
+      queue,
+      completedChildren,
+      finalSummary,
+      testingSummary,
+    });
   }
 }
 
@@ -1039,6 +1290,24 @@ function parseStructuredWorkerResult(workerResult, child) {
   ) {
     throw new Error(
       `Structured worker result missing required field 'tests' for ${child.identifier}.`,
+    );
+  }
+
+  if (typeof parsed?.humanTestingRequired !== "boolean") {
+    throw new Error(
+      `Structured worker result missing required field 'humanTestingRequired' for ${child.identifier}.`,
+    );
+  }
+
+  if (
+    !Array.isArray(parsed?.humanTestingInstructions) ||
+    parsed.humanTestingInstructions.length === 0 ||
+    parsed.humanTestingInstructions.some(
+      (entry) => typeof entry !== "string" || entry.trim() === "",
+    )
+  ) {
+    throw new Error(
+      `Structured worker result missing required field 'humanTestingInstructions' for ${child.identifier}.`,
     );
   }
 
@@ -1153,10 +1422,29 @@ function buildNoCommittedWorkReviewResult(workerResult, child, check) {
       ...workerResult.changes,
       `Crosby postcondition failed: ${diagnostic}`,
     ],
-    requiredHumanAction: `Review ${child.identifier}: Crosby received outcome done but found no qualifying new commit on the parent branch. Commit the completed work on the parent branch or rerun the worker, then move the issue forward.`,
+    requiredHumanAction: `Review ${child.identifier}: Crosby received outcome done but found no qualifying new commit on the child work branch. Commit the completed work on the current child branch or rerun the worker, then move the issue forward.`,
     recoveryNotes: [
       diagnostic,
       "Crosby left the child issue in Review instead of closing it because done results require committed git work.",
+    ],
+  };
+}
+
+function buildPostconditionReviewResult(workerResult, child, diagnostic, action) {
+  return {
+    ...workerResult,
+    outcome: "review",
+    summary: `${workerResult.summary} Crosby postcondition failed after the worker returned done; human review is required before this child can be merged or closed.`,
+    changes: [
+      ...workerResult.changes,
+      `Crosby postcondition failed: ${diagnostic}`,
+    ],
+    requiredHumanAction:
+      action ??
+      `Review ${child.identifier}: Crosby could not complete post-worker verification or merge. Resolve the diagnostic, then rerun Crosby for the parent issue.`,
+    recoveryNotes: [
+      diagnostic,
+      ...(workerResult.recoveryNotes ?? []),
     ],
   };
 }
@@ -1182,6 +1470,7 @@ async function enforceDoneResultHasCommittedWork({
         ...event,
         before: gitSnapshot,
         workerResult,
+        expectedBranchName: event.childBranch?.name,
       }),
     );
   } catch (error) {
@@ -1193,6 +1482,46 @@ async function enforceDoneResultHasCommittedWork({
 
   if (check.hasCommittedWork) return workerResult;
   return buildNoCommittedWorkReviewResult(workerResult, event.child, check);
+}
+
+async function runDonePostconditions({ operations, event, workerResult }) {
+  if (workerResult.outcome !== "done") return workerResult;
+
+  const testCommand = parseIssueTestCommand(event.child);
+  if (testCommand && typeof operations.runVerificationCommand === "function") {
+    try {
+      await operations.runVerificationCommand({
+        ...event,
+        command: testCommand,
+        workerResult,
+      });
+    } catch (error) {
+      return buildPostconditionReviewResult(
+        workerResult,
+        event.child,
+        `Verification command failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Review ${event.child.identifier}: Crosby reran the issue Test Command and it failed. Fix the child branch, rerun the test command, then rerun Crosby for ${event.parent?.identifier ?? "the parent issue"}.`,
+      );
+    }
+  }
+
+  if (typeof operations.mergeChildBranchIntoParent === "function") {
+    try {
+      await operations.mergeChildBranchIntoParent({
+        ...event,
+        workerResult,
+      });
+    } catch (error) {
+      return buildPostconditionReviewResult(
+        workerResult,
+        event.child,
+        `Child branch merge failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Review ${event.child.identifier}: Crosby could not merge the child branch into the parent branch. Resolve the merge issue, then rerun Crosby for ${event.parent?.identifier ?? "the parent issue"}.`,
+      );
+    }
+  }
+
+  return workerResult;
 }
 
 async function resolveExecutableIssuePath(queue, operations, ancestors = []) {
@@ -1276,6 +1605,17 @@ export async function runSingleChildExecution(queue, operations) {
     });
   }
 
+  const childBranch =
+    typeof operations.prepareChildBranch === "function"
+      ? await operations.prepareChildBranch({
+          parent: queue.parent,
+          child,
+          topLevelChild,
+          path,
+          cwd: routing?.cwd,
+        })
+      : null;
+
   for (const issue of path) {
     try {
       await operations.moveIssue(issue.identifier, "Building");
@@ -1305,6 +1645,7 @@ export async function runSingleChildExecution(queue, operations) {
       topLevelChild,
       path,
       cwd: routing?.cwd,
+      childBranch,
     });
   }
 
@@ -1327,6 +1668,7 @@ export async function runSingleChildExecution(queue, operations) {
     topLevelChild,
     path,
     cwd: routing?.cwd,
+    childBranch,
   };
   const gitSnapshot = await snapshotGitStateForExecution(
     operations,
@@ -1349,6 +1691,11 @@ export async function runSingleChildExecution(queue, operations) {
     workerResult,
     gitSnapshot,
   });
+  workerResult = await runDonePostconditions({
+    operations,
+    event: executionEvent,
+    workerResult,
+  });
 
   if (typeof operations.onExecutionFinish === "function") {
     await operations.onExecutionFinish({
@@ -1365,6 +1712,7 @@ export async function runSingleChildExecution(queue, operations) {
 
   if (workerResult.outcome === "review") {
     await operations.moveIssue(child.identifier, "Review");
+    await operations.moveIssue(queue.parent.identifier, "Review");
   }
 
   if (typeof operations.onExecutionFinalized === "function") {
@@ -1374,6 +1722,7 @@ export async function runSingleChildExecution(queue, operations) {
       topLevelChild,
       path,
       cwd: routing?.cwd,
+      childBranch,
       rawWorkerResult,
       workerResult,
     });
@@ -1417,8 +1766,11 @@ export async function runQueueExecution(initialQueue, operations) {
       onExecutionFinish: operations.onExecutionFinish,
       onExecutionFinalized: operations.onExecutionFinalized,
       ensureParentBranch: operations.ensureParentBranch,
+      prepareChildBranch: operations.prepareChildBranch,
       snapshotGitState: operations.snapshotGitState,
       hasCommittedWorkSince: operations.hasCommittedWorkSince,
+      runVerificationCommand: operations.runVerificationCommand,
+      mergeChildBranchIntoParent: operations.mergeChildBranchIntoParent,
       routing: operations.routing,
     });
     completedChildren.push(execution);
@@ -1435,6 +1787,16 @@ export async function runQueueExecution(initialQueue, operations) {
     }
 
     await reportChildOutcomeToParent(queue, execution, operations.addComment);
+
+    if (execution.workerResult.outcome === "review") {
+      return {
+        parent: queue.parent,
+        completedChildren,
+        movedParentToBuilding,
+        finalClassification: classification,
+        remainingByReason: summarizeRemainingChildren(classification),
+      };
+    }
     queue = await operations.refreshQueue(queue.parent.identifier);
     if (typeof operations.onQueueRefreshed === "function") {
       await operations.onQueueRefreshed(queue);
@@ -1443,6 +1805,7 @@ export async function runQueueExecution(initialQueue, operations) {
       addComment: operations.addComment,
       moveIssue: operations.moveIssue,
       finalizeParentCompletion: operations.finalizeParentCompletion,
+      onParentFinalized: operations.onParentFinalized,
     });
   }
 }
@@ -1504,6 +1867,10 @@ export async function runWatchCycle(operations) {
       }
     }
 
+    if (typeof operations.onQueueSelected === "function") {
+      await operations.onQueueSelected(queue);
+    }
+
     const execution = await runSingleChildExecution(queue, {
       moveIssue: operations.moveIssue,
       runWorker: operations.runWorker,
@@ -1513,8 +1880,11 @@ export async function runWatchCycle(operations) {
       onExecutionFinish: operations.onExecutionFinish,
       onExecutionFinalized: operations.onExecutionFinalized,
       ensureParentBranch: operations.ensureParentBranch,
+      prepareChildBranch: operations.prepareChildBranch,
       snapshotGitState: operations.snapshotGitState,
       hasCommittedWorkSince: operations.hasCommittedWorkSince,
+      runVerificationCommand: operations.runVerificationCommand,
+      mergeChildBranchIntoParent: operations.mergeChildBranchIntoParent,
       routing: operations.routing,
     });
 
@@ -1531,6 +1901,17 @@ export async function runWatchCycle(operations) {
     }
 
     await reportChildOutcomeToParent(queue, execution, operations.addComment);
+    if (execution.workerResult.outcome === "review") {
+      return {
+        status: "processed",
+        parent: queue.parent,
+        issue: execution.child,
+        workerPrompt: execution.workerPrompt,
+        workerResult: execution.workerResult,
+        routingErrors,
+      };
+    }
+
     const refreshedQueue = await operations.refreshQueue(
       queue.parent.identifier,
     );

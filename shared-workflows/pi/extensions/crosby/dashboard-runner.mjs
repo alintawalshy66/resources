@@ -108,7 +108,8 @@ export function renderDashboardFromEventsPath(eventsPath) {
 function printDashboard(eventsPath, options = {}) {
   const write = options.write ?? ((text) => process.stdout.write(text));
   const lines = renderDashboardFromEventsPath(eventsPath);
-  write(`${lines.join("\n")}\n`);
+  const refresh = options.refresh !== false;
+  write(`${refresh ? "\x1b[2J\x1b[H" : ""}${lines.join("\n")}\n`);
 }
 
 /**
@@ -131,7 +132,7 @@ export function watchDashboardEventsPath(eventsPath, options = {}) {
     }
     if (size !== lastSize) {
       lastSize = size;
-      printDashboard(eventsPath, { write });
+      printDashboard(eventsPath, { write, refresh: true });
     }
   };
 
@@ -155,7 +156,7 @@ export async function runDashboardRunner(argv, options = {}) {
   }
 
   if (args.once) {
-    printDashboard(eventsPath, { write });
+    printDashboard(eventsPath, { write, refresh: false });
     return { eventsPath, stop: null };
   }
 

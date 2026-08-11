@@ -21,6 +21,9 @@ import {
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   fetchParentQueue,
+  findExistingCrosbyDashboardPane,
+  findExistingCrosbyWorkerAgent,
+  mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -49,11 +52,6 @@ function updateCrosbyDashboardWidget(ctx: any, dashboard: any) {
     ctx.ui.setWidget(
       "crosby-dashboard",
       renderCrosbyCompactDashboard(dashboard),
-      { placement: "aboveEditor" },
-    );
-    ctx.ui.setWidget(
-      "crosby-dashboard-pane",
-      renderCrosbyDashboard(dashboard),
       { placement: "aboveEditor" },
     );
   } catch {
@@ -140,6 +138,12 @@ function normalizeIssueRef(issueRef: string | number | undefined | null) {
   return raw;
 }
 
+function formatIssueViewRef(issueRef: string | number | undefined | null) {
+  const raw = String(issueRef ?? "").trim();
+  if (/^https?:\/\/[^\s]+\/issues\/\d+(?:\b|$)/i.test(raw)) return raw;
+  return normalizeIssueRef(issueRef);
+}
+
 function formatIssueIdentifier(issue: any) {
   const number = issue?.number ?? normalizeIssueRef(issue?.identifier);
   return number ? `#${number}` : String(issue?.identifier ?? "UNKNOWN-ISSUE");
@@ -224,13 +228,41 @@ function deriveBranchName(issue: any) {
   return `issue-${number}${slug ? `-${slug}` : ""}`;
 }
 
+function formatParentContextForSession(queue: any) {
+  const parent = queue?.parent;
+  const labels = getIssueLabelNames(parent);
+  const milestone =
+    parent?.milestone?.title ?? parent?.milestone?.name ?? "none";
+  const children = Array.isArray(queue?.children) ? queue.children : [];
+  const body = String(parent?.body ?? "").trim();
+
+  return [
+    `Crosby parent context loaded: ${parent?.identifier ?? "unknown"} — ${parent?.title ?? "Untitled"}`,
+    "",
+    `URL: ${parent?.url ?? "unknown"}`,
+    `Status: ${parent?.state?.name ?? "unknown"}`,
+    `Milestone: ${milestone}`,
+    `Branch: ${parent?.branchName ?? "unknown"}`,
+    `Labels: ${labels.length ? labels.join(", ") : "none"}`,
+    "",
+    "Parent body:",
+    body || "(empty)",
+    "",
+    "Child queue:",
+    ...(children.length
+      ? children.map(
+          (child: any) =>
+            `- ${child.identifier} ${child.title} — ${child?.state?.name ?? "unknown"}`,
+        )
+      : ["- none"]),
+  ].join("\n");
+}
+
 function toCrosbyIssue(githubIssue: any, children: any[] = []) {
   const statusName = getStatusNameFromGitHubIssue(githubIssue);
   const parentIdentifier = parseParentIssueRef(githubIssue?.body);
-  const labels = (Array.isArray(githubIssue?.labels) ? githubIssue.labels : [])
-    .map((label: any) => ({
-      name: typeof label === "string" ? label : label?.name,
-    }))
+  const labels = getIssueLabelNames(githubIssue)
+    .map((name: string) => ({ name }))
     .filter((label: any) => label.name);
 
   return {
@@ -324,20 +356,58 @@ async function execGhJson(
   );
 }
 
+async function loadNativeSubIssuesFromGitHub(pi: ExtensionAPI, issue: any) {
+  if (!issue?.id) return [];
+
+  const result = await execGhJson(
+    pi,
+    [
+      "api",
+      "graphql",
+      "-f",
+      `query=query($issueId: ID!) {
+        node(id: $issueId) {
+          ... on Issue {
+            subIssues(first: 100) {
+              nodes {
+                number
+                title
+                body
+                state
+                labels(first: 100) { nodes { name } }
+                milestone { title }
+                url
+                comments(first: 100) { nodes { body } }
+              }
+            }
+          }
+        }
+      }`,
+      "-f",
+      `issueId=${issue.id}`,
+    ],
+    `Failed to load native GitHub sub-issues for ${formatIssueIdentifier(issue)}`,
+  );
+
+  return Array.isArray(result?.data?.node?.subIssues?.nodes)
+    ? result.data.node.subIssues.nodes
+    : [];
+}
+
 async function loadIssueFromGitHub(
   pi: ExtensionAPI,
   issueRef: string | number,
   options: { includeChildren?: boolean } = {},
 ) {
-  const normalizedRef = normalizeIssueRef(issueRef);
+  const issueViewRef = formatIssueViewRef(issueRef);
   const issue = await execGhJson(
     pi,
     [
       "issue",
       "view",
-      normalizedRef,
+      issueViewRef,
       "--json",
-      "number,title,body,state,labels,milestone,url,comments",
+      "id,number,title,body,state,labels,milestone,url,comments",
     ],
     `Failed to load GitHub issue ${issueRef}`,
   );
@@ -347,10 +417,19 @@ async function loadIssueFromGitHub(
     const childRefs = parseChildIssueRefs(issue?.body).filter(
       (ref) => ref !== String(issue?.number),
     );
-    children = await Promise.all(
+    const checklistChildren = await Promise.all(
       childRefs.map((ref) =>
         loadIssueFromGitHub(pi, ref, { includeChildren: false }),
       ),
+    );
+    const nativeChildren = (await loadNativeSubIssuesFromGitHub(pi, issue)).map(
+      (child) => toCrosbyIssue(child, []),
+    );
+
+    children = mergeChecklistAndNativeIssueChildren(
+      checklistChildren,
+      nativeChildren,
+      issue?.number,
     );
   }
 
@@ -702,6 +781,25 @@ async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
   return result.stdout.trim();
 }
 
+function getIssueNumber(issue: any) {
+  return String(issue?.number ?? issue?.identifier ?? "").match(/\d+/)?.[0] ?? "issue";
+}
+
+function slugifyBranchPart(value: string | undefined | null, fallback = "work") {
+  const slug = String(value ?? fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return slug || fallback;
+}
+
+function deriveChildBranchName(parentIssue: any, childIssue: any) {
+  const parentNumber = getIssueNumber(parentIssue);
+  const childNumber = getIssueNumber(childIssue);
+  return `crosby/${parentNumber}/${childNumber}-${slugifyBranchPart(childIssue?.title, "child")}`;
+}
+
 async function isGitAncestor(
   pi: ExtensionAPI,
   cwd: string,
@@ -758,6 +856,7 @@ async function hasCommittedWorkSince(
   cwd: string | undefined,
   before: any,
   parentIssue: any,
+  expectedBranchName?: string,
 ) {
   if (!before?.available) {
     return {
@@ -784,7 +883,9 @@ async function hasCommittedWorkSince(
 
   const currentBranch = await getCurrentGitBranch(pi, cwd);
   const currentHead = await getGitRevision(pi, cwd, "HEAD");
-  const expectedBranch = String(parentIssue?.branchName ?? before.branch ?? "").trim();
+  const expectedBranch = String(
+    expectedBranchName ?? parentIssue?.branchName ?? before.branch ?? "",
+  ).trim();
 
   if (expectedBranch && currentBranch !== expectedBranch) {
     return {
@@ -838,6 +939,120 @@ async function pushGitBranch(
   }
 
   await execGit(pi, ["push", "-u", "origin", resolvedBranchName], cwd);
+}
+
+async function prepareChildBranch(
+  pi: ExtensionAPI,
+  parentIssue: any,
+  childIssue: any,
+  cwd?: string,
+) {
+  const issueKey = childIssue?.identifier ?? "UNKNOWN-CHILD";
+  const parentBranch = String(parentIssue?.branchName ?? "").trim();
+  const childBranch = deriveChildBranchName(parentIssue, childIssue);
+
+  if (!cwd) {
+    throw new Error(
+      `Cannot create child branch for ${issueKey} because no local project directory was resolved.`,
+    );
+  }
+  if (!parentBranch) {
+    throw new Error(
+      `Cannot create child branch for ${issueKey} because parent ${parentIssue?.identifier ?? "UNKNOWN-PARENT"} has no branch name.`,
+    );
+  }
+  if (await hasUncommittedGitChanges(pi, cwd)) {
+    throw new Error(
+      `Cannot create child branch ${childBranch} for ${issueKey} because ${cwd} has uncommitted changes.`,
+    );
+  }
+
+  const currentBranch = await getCurrentGitBranch(pi, cwd);
+  if (currentBranch !== parentBranch) {
+    throw new Error(
+      `Cannot create child branch ${childBranch} for ${issueKey}; expected to be on parent branch ${parentBranch}, found ${currentBranch || "(detached HEAD)"}.`,
+    );
+  }
+
+  const parentHead = await getGitRevision(pi, cwd, "HEAD");
+  if (await hasLocalGitBranch(pi, cwd, childBranch)) {
+    await execGit(pi, ["checkout", childBranch], cwd);
+    const childHead = await getGitRevision(pi, cwd, "HEAD");
+    if (!(await isGitAncestor(pi, cwd, parentHead, childHead))) {
+      throw new Error(
+        `Existing child branch ${childBranch} does not descend from current parent HEAD ${parentHead}.`,
+      );
+    }
+  } else {
+    await execGit(pi, ["checkout", "-b", childBranch], cwd);
+  }
+
+  return { name: childBranch, parentBranch, parentHead };
+}
+
+async function runVerificationCommand(
+  pi: ExtensionAPI,
+  cwd: string | undefined,
+  command: string,
+) {
+  if (!cwd) {
+    throw new Error("No local project directory was resolved for verification.");
+  }
+
+  const result = await pi.exec("bash", ["-lc", command], { cwd });
+  if (result.code !== 0) {
+    const details = [result.stderr, result.stdout]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    throw new Error(
+      details
+        ? `Verification command failed: ${details}`
+        : `Verification command failed with exit code ${result.code}.`,
+    );
+  }
+}
+
+async function mergeChildBranchIntoParent(
+  pi: ExtensionAPI,
+  parentIssue: any,
+  childIssue: any,
+  childBranchInfo: any,
+  cwd?: string,
+) {
+  const issueKey = childIssue?.identifier ?? "UNKNOWN-CHILD";
+  const parentBranch = String(
+    childBranchInfo?.parentBranch ?? parentIssue?.branchName ?? "",
+  ).trim();
+  const childBranch = String(childBranchInfo?.name ?? "").trim();
+
+  if (!cwd) {
+    throw new Error(`Cannot merge ${issueKey} because no local project directory was resolved.`);
+  }
+  if (!parentBranch || !childBranch) {
+    throw new Error(`Cannot merge ${issueKey} because parent or child branch name is missing.`);
+  }
+  if (await hasUncommittedGitChanges(pi, cwd)) {
+    throw new Error(`Cannot merge ${childBranch} into ${parentBranch} because ${cwd} has uncommitted changes.`);
+  }
+
+  const childHead = await getGitRevision(pi, cwd, "HEAD");
+  const currentBranch = await getCurrentGitBranch(pi, cwd);
+  if (currentBranch !== childBranch) {
+    throw new Error(
+      `Cannot merge ${issueKey}; expected current branch ${childBranch}, found ${currentBranch || "(detached HEAD)"}.`,
+    );
+  }
+
+  await execGit(pi, ["checkout", parentBranch], cwd);
+  await execGit(pi, ["merge", "--ff-only", childBranch], cwd);
+
+  const parentHead = await getGitRevision(pi, cwd, "HEAD");
+  if (!(await isGitAncestor(pi, cwd, childHead, parentHead))) {
+    throw new Error(
+      `Merge verification failed: child HEAD ${childHead} is not contained in parent branch ${parentBranch}.`,
+    );
+  }
 }
 
 async function ensureParentBranch(
@@ -1008,6 +1223,52 @@ function getDashboardRunnerScriptPath() {
   );
 }
 
+async function findExistingDashboardPane(pi: ExtensionAPI) {
+  const args = ["pane", "list"];
+  if (process.env.HERDR_WORKSPACE_ID) {
+    args.push("--workspace", process.env.HERDR_WORKSPACE_ID);
+  }
+  const listed = await execHerdrJson(
+    pi,
+    args,
+    "Failed to inspect Herdr panes for an existing Crosby dashboard",
+  );
+  return findExistingCrosbyDashboardPane(listed?.result?.panes, {
+    tabId: process.env.HERDR_TAB_ID,
+    workspaceId: process.env.HERDR_WORKSPACE_ID,
+  });
+}
+
+async function startDashboardRunnerInPane(
+  pi: ExtensionAPI,
+  paneId: string,
+  runId: string,
+  options: { restart?: boolean } = {},
+) {
+  if (options.restart) {
+    await execHerdr(pi, ["pane", "send-keys", paneId, "ctrl+c"], "Failed to stop existing Crosby dashboard runner").catch(() => {
+      // The pane may already be idle; continue and start the new runner.
+    });
+  }
+
+  const nodeInvocation = getNodeInvocation([
+    getDashboardRunnerScriptPath(),
+    "--run",
+    runId,
+  ]);
+  await execHerdr(
+    pi,
+    [
+      "pane",
+      "run",
+      paneId,
+      nodeInvocation.command,
+      ...nodeInvocation.args,
+    ],
+    "Failed to start Crosby dashboard runner in Herdr pane",
+  );
+}
+
 async function openCrosbyDashboardPane(
   pi: ExtensionAPI,
   dashboardController: ReturnType<
@@ -1019,6 +1280,18 @@ async function openCrosbyDashboardPane(
   if (!shouldOpenCrosbyDashboardPane()) return;
 
   try {
+    const existingPane = await findExistingDashboardPane(pi).catch(() => null);
+    if (existingPane?.pane_id) {
+      await startDashboardRunnerInPane(
+        pi,
+        existingPane.pane_id,
+        dashboardController.dashboard.runId,
+        { restart: true },
+      );
+      dashboardController.dashboardPaneOpened({ paneId: existingPane.pane_id });
+      return;
+    }
+
     const opened = await execHerdr(
       pi,
       [
@@ -1037,26 +1310,15 @@ async function openCrosbyDashboardPane(
     await execHerdr(
       pi,
       ["pane", "rename", paneId, "Crosby dashboard"],
-      "Failed to label Herdr dashboard pane for Crosby",
+      "Failed to label Herdr pane for Crosby",
     ).catch(() => {
       // Pane labeling is best-effort; keep the dashboard pane running even if rename fails.
     });
 
-    const nodeInvocation = getNodeInvocation([
-      getDashboardRunnerScriptPath(),
-      "--run",
-      dashboardController.dashboard.runId,
-    ]);
-    await execHerdr(
+    await startDashboardRunnerInPane(
       pi,
-      [
-        "pane",
-        "run",
-        paneId,
-        nodeInvocation.command,
-        ...nodeInvocation.args,
-      ],
-      "Failed to start Crosby dashboard runner in Herdr pane",
+      paneId,
+      dashboardController.dashboard.runId,
     );
 
     dashboardController.dashboardPaneOpened({ paneId });
@@ -1171,6 +1433,34 @@ async function execHerdr(
     );
   }
   return result;
+}
+
+async function execHerdrJson(
+  pi: ExtensionAPI,
+  args: string[],
+  errorContext: string,
+) {
+  const result = await execHerdr(pi, args, errorContext);
+  try {
+    return JSON.parse(result.stdout || "null");
+  } catch (error) {
+    throw new Error(
+      `${errorContext}. Failed to parse Herdr JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function findExistingHerdrWorkerAgent(
+  pi: ExtensionAPI,
+  issueKey?: string | null,
+  cwd?: string,
+) {
+  const listed = await execHerdrJson(
+    pi,
+    ["agent", "list"],
+    "Failed to inspect existing Herdr agents for Crosby worker reuse",
+  );
+  return findExistingCrosbyWorkerAgent(listed?.result?.agents, issueKey, cwd);
 }
 
 function isHerdrPaneNotReadyForAgent(error: unknown) {
@@ -1296,6 +1586,79 @@ async function runIsolatedWorkerInHerdrPane(
   const interactivePrompt = buildInteractiveWorkerPrompt(prompt, resultPath);
   await writeFile(promptPath, interactivePrompt, "utf8");
   const label = opts.issueKey ? `Crosby ${opts.issueKey}` : "Crosby worker";
+
+  const existingAgent = await findExistingHerdrWorkerAgent(
+    pi,
+    opts.issueKey,
+    opts.cwd,
+  ).catch(() => null);
+  if (existingAgent) {
+    const target = existingAgent.name ?? existingAgent.pane_id;
+    if (!target) {
+      throw new Error(
+        `Found an existing Crosby worker for ${opts.issueKey ?? "the issue"}, but it has no reusable Herdr target.`,
+      );
+    }
+
+    if (String(existingAgent.agent_status ?? "") === "working") {
+      await execHerdr(
+        pi,
+        ["agent", "wait", target],
+        `Existing Crosby worker ${target} did not become ready for reuse`,
+      );
+    }
+
+    if (typeof opts.onHerdrWorkerStarted === "function") {
+      await opts.onHerdrWorkerStarted({
+        issueKey: opts.issueKey ?? null,
+        paneId: existingAgent.pane_id ?? null,
+        agentName: existingAgent.name ?? null,
+        label,
+        cwd: opts.cwd ?? null,
+        reused: true,
+      });
+    }
+
+    await execHerdr(
+      pi,
+      ["agent", "prompt", target, interactivePrompt, "--wait"],
+      `Failed to continue existing Crosby worker ${target}`,
+    );
+
+    let stdout = "";
+    try {
+      stdout = (await readFile(resultPath, "utf8")).trim();
+    } catch {
+      const transcript = await execHerdr(
+        pi,
+        [
+          "agent",
+          "read",
+          target,
+          "--source",
+          "recent-unwrapped",
+          "--lines",
+          "200",
+        ],
+        "Failed to read reused interactive Pi worker transcript after missing result file",
+      ).catch((error) => ({
+        stdout: error instanceof Error ? error.message : String(error),
+      }));
+      throw new Error(
+        `Reused interactive Pi worker ${target} did not write ${resultPath}. ` +
+          `Recovery: inspect pane ${existingAgent.pane_id ?? target}, then write the final Crosby JSON result to ${resultPath} or rerun Crosby. ` +
+          `Recent transcript:\n${transcript.stdout}`,
+      );
+    }
+
+    return {
+      stdout,
+      stderr: await readFile(stderrPath, "utf8").catch(() => ""),
+      code: 0,
+      killed: false,
+    };
+  }
+
   const agentName = makeHerdrAgentName(opts.issueKey);
   const opened = await openHerdrWorkerPane(pi, label, opts.cwd);
   const paneId = parseHerdrPaneId(opened.stdout);
@@ -1420,9 +1783,15 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
+              prepareChildBranch: ({ parent, child, cwd }) =>
+                prepareChildBranch(pi, parent, child, cwd),
               snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
-              hasCommittedWorkSince: ({ cwd, before, parent }) =>
-                hasCommittedWorkSince(pi, cwd, before, parent),
+              hasCommittedWorkSince: ({ cwd, before, parent, expectedBranchName }) =>
+                hasCommittedWorkSince(pi, cwd, before, parent, expectedBranchName),
+              runVerificationCommand: ({ cwd, command }) =>
+                runVerificationCommand(pi, cwd, command),
+              mergeChildBranchIntoParent: ({ parent, child, childBranch, cwd }) =>
+                mergeChildBranchIntoParent(pi, parent, child, childBranch, cwd),
               refreshQueue: (parentIssueKey) =>
                 fetchParentQueue(parentIssueKey, (key) =>
                   loadIssueFromGitHub(pi, key),
@@ -1448,6 +1817,12 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                   dashboardController.reset(queue, "watch");
                   void openCrosbyDashboardPane(pi, dashboardController);
                 }
+              },
+              onQueueSelected: (queue) => {
+                pi.appendEntry(
+                  "crosby-parent-context",
+                  formatParentContextForSession(queue),
+                );
               },
               onExecutionStart: (event) => {
                 dashboardController?.executionStarted(event);
@@ -1475,6 +1850,10 @@ export default function crosbyExtension(pi: ExtensionAPI) {
               },
               onExecutionFinalized: (event) => {
                 dashboardController?.executionFinalized(event);
+              },
+              onParentFinalized: ({ finalSummary, testingSummary }) => {
+                pi.appendEntry("crosby-final-human-summary", finalSummary);
+                pi.appendEntry("crosby-final-testing-summary", testingSummary);
               },
               onQueueRefreshed: (queue) => {
                 dashboardController?.queueRefreshed(queue);
@@ -1573,6 +1952,11 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           return;
         }
 
+        pi.appendEntry(
+          "crosby-parent-context",
+          formatParentContextForSession(queue),
+        );
+
         dashboardController = createCrosbyDashboardController(
           ctx,
           queue,
@@ -1596,9 +1980,15 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
+          prepareChildBranch: ({ parent, child, cwd }) =>
+            prepareChildBranch(pi, parent, child, cwd),
           snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
-          hasCommittedWorkSince: ({ cwd, before, parent }) =>
-            hasCommittedWorkSince(pi, cwd, before, parent),
+          hasCommittedWorkSince: ({ cwd, before, parent, expectedBranchName }) =>
+            hasCommittedWorkSince(pi, cwd, before, parent, expectedBranchName),
+          runVerificationCommand: ({ cwd, command }) =>
+            runVerificationCommand(pi, cwd, command),
+          mergeChildBranchIntoParent: ({ parent, child, childBranch, cwd }) =>
+            mergeChildBranchIntoParent(pi, parent, child, childBranch, cwd),
           refreshQueue: (parentIssueKey) =>
             fetchParentQueue(parentIssueKey, (key) =>
               loadIssueFromGitHub(pi, key),
@@ -1630,6 +2020,10 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           },
           onExecutionFinalized: (event) => {
             dashboardController?.executionFinalized(event);
+          },
+          onParentFinalized: ({ finalSummary, testingSummary }) => {
+            pi.appendEntry("crosby-final-human-summary", finalSummary);
+            pi.appendEntry("crosby-final-testing-summary", testingSummary);
           },
           onQueueRefreshed: (refreshedQueue) => {
             dashboardController?.queueRefreshed(refreshedQueue);

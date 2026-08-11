@@ -146,6 +146,7 @@ test("--once renders current state and exits without watching", async () => {
   assert.equal(result.stop, null);
   assert.equal(writes.length, 1);
   assert.match(writes[0], /Crosby #129: Parent/);
+  assert.equal(writes[0].startsWith("\x1b[2J\x1b[H"), false);
 });
 
 test("watch mode reprints when the events file gains new appended lines", async () => {
@@ -164,6 +165,7 @@ test("watch mode reprints when the events file gains new appended lines", async 
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(writes.length, 1);
+  assert.equal(writes[0].startsWith("\x1b[2J\x1b[H"), true);
 
   dashboard.currentIssueKey = "#130";
   dashboard.updatedAt = "2026-08-02T00:00:01.000Z";
