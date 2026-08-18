@@ -5,7 +5,7 @@ description: Break a plan, spec, or PRD into independently grabbable GitHub issu
 
 # To Issues
 
-Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that can be worked independently.
+Convert a plan, spec, or PRD into thin, vertical-slice native GitHub sub-issues that can be worked independently.
 
 ## When to Use
 
@@ -13,7 +13,7 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 - You want small, independently testable slices of work.
 - You need dependencies made explicit.
 - You want to avoid horizontal, layer-by-layer issue breakdowns.
-- You want approved slices created as GitHub child issues linked to an originating parent issue.
+- You want approved slices created as native GitHub sub-issues linked to an originating parent issue.
 
 ## Core Principles
 
@@ -24,8 +24,8 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 5. Prefer many thin issues over a few thick ones.
 6. Treat GitHub Issues as the committed execution view, not the drafting surface.
 7. Make AFK/buildable issues parallel-ready by giving Crosby a tight execution envelope: expected files, do-not-touch boundaries, test command, and advisory locks.
-8. Never create GitHub child issues before explicit user approval.
-9. If no parent issue exists, draft and create a parent issue from the approved context before creating children.
+8. Never create GitHub sub-issues before explicit user approval.
+9. If no parent issue exists, draft and create a parent issue from the approved context before creating sub-issues.
 
 ## Workflow
 
@@ -34,7 +34,7 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 - Read the plan, spec, or PRD.
 - Identify the user stories and the minimum viable outcome.
 - Resolve the originating GitHub parent issue from the current feature context.
-- If a parent issue exists, load the parent issue metadata needed for child creation:
+- If a parent issue exists, load the parent issue metadata needed for sub-issue creation:
   - parent issue number or URL
   - parent title/body
   - parent labels
@@ -47,11 +47,11 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 
 - If no parent issue can be resolved confidently, draft a parent issue from the source context instead of stopping:
   - parent title that captures the feature/initiative
-  - parent body summarizing context, scope, constraints, and the planned child checklist placeholder
+  - parent body summarizing context, scope, constraints, and the planned native sub-issue list placeholder
   - parent labels: `type:parent`, `status:ready`, the appropriate work-type label (`wt:development` or `wt:process-automation`), and any justified local-folder routing label
   - parent milestone, if one can be inferred confidently; otherwise leave the milestone unset and call that out
-- Present the drafted parent issue with the child issue list for approval before creating anything in GitHub.
-- If an existing parent issue is found but its labels/milestone cannot be loaded confidently, stop and ask the user before creating children.
+- Present the drafted parent issue with the sub-issue list for approval before creating anything in GitHub.
+- If an existing parent issue is found but its labels/milestone cannot be loaded confidently, stop and ask the user before creating sub-issues.
 
 ### 2) Draft slices
 
@@ -63,7 +63,7 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
   - `## Expected Files` — files or directories the worker is expected to touch.
   - `## Do Not Touch` — files/directories that are explicitly out of scope.
   - `## Test Command` — the narrowest useful verification command.
-  - `## Crosby Locks` — advisory file/directory/domain locks used to avoid launching conflicting children in parallel.
+  - `## Crosby Locks` — advisory file/directory/domain locks used to avoid launching conflicting sub-issues in parallel.
 - If an AFK issue is too vague to name expected files, tests, and locks, mark it HITL or split/add an investigation issue first.
 - Every AFK/buildable issue must include both:
   - a provider-qualified model label: `model:<provider>/<model-id>`
@@ -108,29 +108,30 @@ Convert a plan, spec, or PRD into thin, vertical-slice GitHub child issues that 
 - Include proposed labels for each issue.
 - Explicitly ask for approval before creating anything in GitHub, including the parent issue when one does not already exist.
 
-### 6) Create GitHub parent and child issues after approval
+### 6) Create GitHub parent and native sub-issues after approval
 
 Only after explicit user approval, create the approved issues in GitHub.
 
 If no parent issue existed, create the parent first with `gh issue create`. The created parent should include:
 
 - A feature/initiative title derived from the approved context.
-- A body summarizing the source context, scope, constraints, and a `## Child Issues` placeholder to be updated after child creation.
+- A body summarizing the source context, scope, constraints, and a `## Sub-Issues` placeholder to be updated after sub-issue creation when useful.
 - Labels: `type:parent`, `status:ready`, the appropriate work-type label, and any justified local-folder routing label.
 - The inferred milestone, when one was approved.
 
-Then create the approved child issues linked to the parent issue.
+Then create each approved execution issue and attach it to the parent as a **native GitHub sub-issue**.
 
-Use `gh issue create` for each child. Each created child should include:
+Use `gh issue create` for each sub-issue, then immediately link it to the parent with GitHub's native sub-issue GraphQL mutation. Do not rely on a body-only `Parent: #<parent-number>` reference or a checklist as the parent/sub-issue relationship.
 
-- `Parent: #<parent-number>` in the body.
+Each created sub-issue should include:
+
 - Scope and acceptance criteria.
 - Any blocker/dependency notes.
 - For AFK/buildable issues: `Expected Files`, `Do Not Touch`, `Test Command`, and `Crosby Locks` sections.
 - The same milestone as the parent, when present.
 - Inherited parent labels where appropriate, especially work-type and local-folder routing labels.
 - Type/status/mode labels:
-  - all children: `type:child`
+  - all executable sub-issues: `type:child` — keep this label for Crosby compatibility even though the GitHub relationship is a native sub-issue
   - AFK/buildable issues: `mode:afk`, `status:ready-to-build`
   - HITL/manual issues: `mode:hitl`, `status:ready` or `status:review`
   - work type: `wt:development` or `wt:process-automation`
@@ -155,30 +156,39 @@ Required worker routing guidance for AFK/buildable issues:
 Example:
 
 ```bash
-gh issue create \
+parent_id=$(gh issue view 122 --json id --jq .id)
+
+sub_issue_url=$(gh issue create \
   --title "Add backend validation" \
-  --body "Parent: #122\n\n## Scope\n...\n\n## Expected Files\n- backend/app/validation.py\n- backend/app/tests/test_validation.py\n\n## Do Not Touch\n- frontend/\n- migrations/\n\n## Crosby Locks\n- backend/app/validation.py\n\n## Test Command\npytest backend/app/tests/test_validation.py\n\n## Acceptance Criteria\n- [ ] ..." \
+  --body "## Scope\n...\n\n## Expected Files\n- backend/app/validation.py\n- backend/app/tests/test_validation.py\n\n## Do Not Touch\n- frontend/\n- migrations/\n\n## Crosby Locks\n- backend/app/validation.py\n\n## Test Command\npytest backend/app/tests/test_validation.py\n\n## Acceptance Criteria\n- [ ] ..." \
   --label "type:child,status:ready-to-build,mode:afk,wt:development,model:github-copilot/gpt-5.5,effort:medium" \
-  --milestone "my-feature"
+  --milestone "my-feature")
+
+sub_issue_id=$(gh issue view "$sub_issue_url" --json id --jq .id)
+
+gh api graphql \
+  -f query='mutation($parent:ID!, $subIssue:ID!) { addSubIssue(input: { issueId: $parent, subIssueId: $subIssue }) { issue { number } subIssue { number } } }' \
+  -f parent="$parent_id" \
+  -f subIssue="$sub_issue_id"
 ```
 
-After creating the children:
+After creating the sub-issues:
 
-- Add or update a parent comment containing the child issue list in dependency order.
-- If safely possible, update the parent issue body to include a `## Child Issues` checklist:
+- Add or update a parent comment containing the native sub-issue list in dependency order.
+- If safely possible, update the parent issue body to include a `## Sub-Issues` reference list for readability, while keeping the native sub-issue relationship as the source of truth:
 
   ```markdown
-  ## Child Issues
+  ## Sub-Issues
 
-  - [ ] #123 Add backend validation
-  - [ ] #124 Add frontend empty state
+  - #123 Add backend validation
+  - #124 Add frontend empty state
   ```
 
 - Do not create a new parent issue when an existing parent was resolved.
 - Verify the parent has `type:parent`, an appropriate status label, work-type label, optional routing label, and approved milestone.
-- Verify each child has the correct parent reference, milestone, labels, and initial status label.
+- Verify each created issue is attached to the parent as a native GitHub sub-issue, and has the correct milestone, labels, and initial status label.
 - If verification shows inherited labels were missed, add the missing labels; never remove existing labels unless the user explicitly requested removal.
-- Report the created parent issue when applicable, plus child issue numbers, URLs, inherited milestone, inherited labels, mode labels, and initial status labels back to the user.
+- Report the created parent issue when applicable, plus sub-issue numbers, URLs, inherited milestone, inherited labels, mode labels, and initial status labels back to the user.
 
 ## Output Format
 
@@ -189,7 +199,7 @@ If a new parent issue is needed, first show:
 - Proposed parent labels
 - Proposed parent milestone, or `none` with reason
 
-Use a numbered list where each proposed child issue includes:
+Use a numbered list where each proposed sub-issue includes:
 
 - Title
 - Type: HITL or AFK
@@ -208,12 +218,12 @@ Use a numbered list where each proposed child issue includes:
 After approval and creation, also report:
 
 - GitHub parent issue, including whether it was existing or newly created
-- Created child issue numbers
-- Created child issue URLs
-- Created child milestone
-- Created child inherited labels
-- Created child mode labels (`mode:afk` or `mode:hitl`)
-- Created child initial status labels
+- Created sub-issue numbers
+- Created sub-issue URLs
+- Created sub-issue milestone
+- Created sub-issue inherited labels
+- Created sub-issue mode labels (`mode:afk` or `mode:hitl`)
+- Created sub-issue initial status labels
 
 ## Quality Checks
 
@@ -227,8 +237,9 @@ After approval and creation, also report:
 - Are the local planning artifacts still aligned with the approved issue breakdown?
 - Has explicit user approval been captured before GitHub issue creation?
 - If no parent existed, is the proposed parent clear, labeled `type:parent`, assigned an appropriate status/work-type/routing label set, and approved before creation?
-- Will every created child inherit the parent milestone and relevant labels?
-- Will every created child receive the correct additive `mode:*` and `status:*` labels without replacing inherited labels?
+- Will every created sub-issue inherit the parent milestone and relevant labels?
+- Will every created sub-issue receive the correct additive `mode:*` and `status:*` labels without replacing inherited labels?
+- Was every created execution issue attached to the parent with GitHub's native `addSubIssue` relationship?
 - Was inheritance and type/status/mode assignment verified after creation?
 
 ## Troubleshooting
@@ -256,12 +267,16 @@ After approval and creation, also report:
 - Tell the user to check `gh` installation/authentication and try again.
 
 **Created issues landed with the wrong labels**
-- Immediately correct the child issue labels based on type:
+- Immediately correct the sub-issue labels based on type:
   - AFK → `type:child`, `mode:afk`, `status:ready-to-build`
   - HITL → `type:child`, `mode:hitl`, `status:ready` or `status:review`
 - Do not leave typed execution issues without a clear status label.
 
 **Created issues did not inherit the parent milestone or labels**
-- Immediately correct the child issues so they match the parent milestone and relevant labels.
+- Immediately correct the sub-issues so they match the parent milestone and relevant labels.
 - Use additive label commands (`gh issue edit <issue> --add-label <label>`) so existing labels are preserved.
-- If the parent metadata could not be resolved confidently, stop and ask the user before creating additional children.
+- If the parent metadata could not be resolved confidently, stop and ask the user before creating additional sub-issues.
+
+**Created issues were not attached as native sub-issues**
+- Immediately link each created execution issue to the parent using the `addSubIssue` GraphQL mutation.
+- If native sub-issue linking fails, report the created but unlinked issue numbers and ask the user how to proceed; do not represent them as complete sub-issues.
