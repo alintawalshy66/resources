@@ -60,7 +60,7 @@ Convert a plan, spec, or PRD into thin, vertical-slice native GitHub sub-issues 
   - If no parent issue can be resolved confidently, draft a parent issue from the source context instead of stopping:
     - parent title that captures the feature/initiative
     - parent body summarizing context, scope, constraints, and the planned native sub-issue list placeholder
-    - parent labels: `type:parent`, `status:ready`, the appropriate work-type label (`wt:development` or `wt:process-automation`), and any justified local-folder routing label
+    - parent labels: `type:parent`, `status:ready`, the appropriate work-type label (`wt:development` or `wt:process-automation`), and the Crosby local-folder routing label when any child is AFK/buildable
     - parent milestone, if one can be inferred confidently; otherwise leave the milestone unset and call that out
   - Present the drafted parent issue with the sub-issue list for approval before creating anything in GitHub.
   - If an existing parent issue is found but its labels/milestone cannot be loaded confidently, stop and ask the user before creating sub-issues.
@@ -91,6 +91,10 @@ Convert a plan, spec, or PRD into thin, vertical-slice native GitHub sub-issues 
   - Use `effort:medium` for normal implementation with some design judgement.
   - Use `effort:high` or above for architecture, security, migrations, concurrency, or broad cross-module work.
 - HITL/manual issues may omit model labels unless a worker is expected to execute code, but should still include an effort label when the issue will guide later implementation.
+- For GitHub Issues intended for Crosby execution, ensure the parent and every AFK/buildable child has exactly one local-folder routing label that matches the local checkout directory name, such as `dlhub` for `/home/walsc0/projects/dlhub`.
+- Infer the routing label from an existing parent label or the current repository folder only when confident.
+- If the routing label cannot be inferred, ask the user before creating issues.
+- If multiple plausible local-folder routing labels are present, ask the user which one Crosby should use before creating issues.
 - If a model label is proposed, verify or ask the user to verify it before issue creation with:
 
   ```bash
@@ -161,7 +165,7 @@ If no parent issue existed, create the parent first with `gh issue create`. The 
 
 - A feature/initiative title derived from the approved context.
 - A body summarizing the source context, scope, constraints, and a `## Sub-Issues` placeholder to be updated after sub-issue creation when useful.
-- Labels: `type:parent`, `status:ready`, the appropriate work-type label, and any justified local-folder routing label.
+- Labels: `type:parent`, `status:ready`, the appropriate work-type label, and the Crosby local-folder routing label when any child is AFK/buildable.
 - The inferred milestone, when one was approved.
 
 Then create each approved execution issue and attach it to the parent as a **native GitHub sub-issue**.
@@ -174,7 +178,7 @@ Each created sub-issue should include:
 - Any blocker/dependency notes.
 - For AFK/buildable issues: `Expected Files`, `Do Not Touch`, `Test Command`, and `Crosby Locks` sections.
 - The same milestone as the parent, when present.
-- Inherited parent labels where appropriate, especially work-type and local-folder routing labels.
+- Inherited parent labels required for execution, especially work-type and the Crosby local-folder routing label. AFK/buildable children must carry the routing label.
 - Type/status/mode labels:
   - all executable sub-issues: `type:child` — keep this label for Crosby compatibility even though the GitHub relationship is a native sub-issue
   - AFK/buildable issues: `mode:afk`, `status:ready-to-build`
@@ -230,8 +234,8 @@ After creating the sub-issues:
   ```
 
 - Do not create a new parent issue when an existing parent was resolved.
-- Verify the parent has `type:parent`, an appropriate status label, work-type label, optional routing label, and approved milestone.
-- Verify each created issue is attached to the parent as a native GitHub sub-issue, and has the correct milestone, labels, and initial status label.
+- Verify the parent has `type:parent`, an appropriate status label, work-type label, the Crosby local-folder routing label when any child is AFK/buildable, and approved milestone.
+- Verify each created issue is attached to the parent as a native GitHub sub-issue, and has the correct milestone, labels, routing label, and initial status label.
 - If verification shows inherited labels were missed, add the missing labels; never remove existing labels unless the user explicitly requested removal.
 - Report the created parent issue when applicable, plus sub-issue numbers, URLs, inherited milestone, inherited labels, mode labels, and initial status labels back to the user.
 
@@ -284,7 +288,7 @@ Use a numbered list where each proposed child work item includes:
 - Crosby locks (AFK required)
 - Test command (AFK required)
 - Acceptance criteria
-- Proposed labels, including required provider-qualified `model:<provider>/<model-id>` and `effort:<thinking-level>` labels for AFK/buildable issues
+- Proposed labels, including the required Crosby local-folder routing label plus provider-qualified `model:<provider>/<model-id>` and `effort:<thinking-level>` labels for AFK/buildable issues
 
 After approval and creation, also report:
 
@@ -308,7 +312,8 @@ After approval and creation, also report:
 - Are the local planning artifacts still aligned with the approved issue breakdown?
 - Has explicit user approval been captured before tracker issue creation?
 - If no parent existed, is the proposed parent clear, labeled `type:parent`, assigned an appropriate status/work-type/routing label set, and approved before creation?
-- Will every created sub-issue inherit the parent milestone and relevant labels?
+- For GitHub Issues with any AFK/buildable child, does the parent have exactly one Crosby local-folder routing label matching the intended checkout directory?
+- Will every AFK/buildable GitHub sub-issue inherit the Crosby local-folder routing label plus the parent milestone and relevant labels?
 - Will every created sub-issue receive the correct additive `mode:*` and `status:*` labels without replacing inherited labels?
 - Was every created execution issue attached to the parent with GitHub's native `addSubIssue` relationship when using GitHub Issues?
 - If Jira is selected, did the issue hierarchy match the PRD metadata: Epic → Stories, or Story/Bug/Task → Sub-tasks?
@@ -351,8 +356,9 @@ After approval and creation, also report:
 
 **Created issues did not inherit the parent milestone or labels**
 - Immediately correct the sub-issues so they match the parent milestone and relevant labels.
+- For AFK/buildable GitHub sub-issues, immediately add the Crosby local-folder routing label if it is missing.
 - Use additive label commands (`gh issue edit <issue> --add-label <label>`) so existing labels are preserved.
-- If the parent metadata could not be resolved confidently, stop and ask the user before creating additional sub-issues.
+- If the parent metadata or routing label could not be resolved confidently, stop and ask the user before creating additional sub-issues.
 
 **Created issues were not attached as native sub-issues**
 - Immediately link each created execution issue to the parent using the `addSubIssue` GraphQL mutation.

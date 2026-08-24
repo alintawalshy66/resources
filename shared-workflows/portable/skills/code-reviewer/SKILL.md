@@ -31,11 +31,12 @@ Examples:
 1. Finds the best available source of intent.
 2. Reviews only changed work, not unrelated existing code.
 3. Classifies the change type before judging test requirements.
-4. Discovers repo-specific build/test/check commands.
-5. Runs clear, appropriate automated checks when safe.
-6. Reviews the diff against the embedded checklist, including Deep Modules and TDD evidence.
-7. Reports findings with exact files/lines and recommended fixes.
-8. Does **not** auto-fix unless the user explicitly asks after the review.
+4. Discovers repo-specific standards, principles, constitutions, and architectural guidance.
+5. Discovers repo-specific build/test/typecheck/lint/check commands.
+6. Runs clear, appropriate automated checks when safe.
+7. Reviews the diff against the discovered standards and embedded checklist, including Deep Modules and TDD evidence.
+8. Reports findings with exact files/lines and recommended fixes.
+9. Does **not** auto-fix unless the user explicitly asks after the review.
 
 ---
 
@@ -77,17 +78,34 @@ Use this priority order:
 
 Absence of a formal spec is not a blocker. If intent is unavailable, state that traceability is limited and review for correctness, tests, architecture, safety, and maintainability.
 
-### 3. Load local guidance
+### 3. Load local guidance and repo standards
 
 Read relevant repo guidance if present:
 
 - `AGENTS.md`
 - `CLAUDE.md`
 - `README.md`
+- contribution docs
 - `.github/workflows/*`
 - local constitution/reference docs if present
 
-If a constitution exists, enforce it. If no constitution exists, apply this skill's checklist as the review standard.
+Then perform a dedicated repo standards discovery pass. Look for documents whose names or headings imply enforceable standards, including:
+
+- `constitution.md`, `constitution*.md`, `.specify/memory/constitution.md`
+- `engineering-principles.md`, `engineering-standards.md`, `development-standards.md`
+- `architecture.md`, `ARCHITECTURE.md`, `docs/architecture*.md`
+- `docs/refactor-audit.md`, `docs/adr/*`, `docs/agents/*`
+- `CONTEXT.md`, `CONTEXT-MAP.md` when they define domain language or invariants
+- any local guidance file that says rules are "hard rules", "standards", "principles", "non-negotiable", or "constitution"
+
+If this shared workflow repo is available, also read the canonical constitution routing entrypoint and any clearly applicable mapped document:
+
+- `shared-workflows/references/constitution.md`
+- mapped work-type document when a work-type selector is available
+
+Do not hard-block manual/local reviews only because a work-type label or prompt header is absent. Instead, state which constitution/standards were loaded and what could not be routed. If a repository-specific constitution or standards document exists, enforce it. If no constitution or standards exist, apply this skill's checklist as the review standard.
+
+Treat explicit hard-rule/standards violations in discovered docs as review defects even when automated checks pass.
 
 ### 4. Inspect changed files and surrounding seams
 
@@ -97,7 +115,7 @@ Read changed files and only enough surrounding code to understand:
 - tests that should cover the behavior
 - module boundaries
 - ownership/auth/invariant enforcement
-- build/test tooling
+- build/test/typecheck/lint tooling
 
 ---
 
@@ -152,7 +170,7 @@ Not sufficient by itself:
 
 Discover commands from the repo rather than hardcoding project names or package managers.
 
-1. Local guidance: `AGENTS.md`, `CLAUDE.md`, `README.md`, contribution docs.
+1. Local guidance and standards: `AGENTS.md`, `CLAUDE.md`, `README.md`, contribution docs, engineering standards/principles.
 2. CI definitions: `.github/workflows/*`, other CI config.
 3. Project manifests:
    - `package.json` scripts
@@ -160,17 +178,39 @@ Discover commands from the repo rather than hardcoding project names or package 
    - `justfile`
    - `pyproject.toml`
    - language-specific equivalents
-4. Existing test commands visible in scripts or docs.
+4. Existing test/check commands visible in scripts or docs.
+5. Tool config files even when scripts are missing, such as `tsconfig.json`, ESLint configs, Ruff configs, MyPy configs, Pytest config, Vitest config, Playwright config, formatter configs, or security-scan config.
+
+### Required check categories
+
+For changed code, discover and report these categories when applicable:
+
+- **Tests**: unit, integration, regression, e2e, or focused tests for the touched behavior.
+- **Build**: production/package build or compile step where available.
+- **Type checks**: explicit typecheck scripts, compiler no-emit modes, MyPy/Pyright, TypeScript compiler, or language equivalent.
+- **Lint/static analysis**: ESLint, Ruff, Flake8, Pylint, Biome, ShellCheck, or language equivalent.
+- **Formatting**: only when the repo documents a formatter/check command.
+- **Security/secret checks**: only when locally runnable without credentials or external services.
+
+If a category is relevant but no command/config exists, report it as `NOT FOUND`; do not silently omit it.
+
+Examples of inferred-but-not-hardcoded checks when scripts/configs exist:
+
+- `package.json` has `build` but no typecheck script: consider `npm run build` and, if TypeScript config exists, `npx tsc --noEmit` when safe.
+- `package.json` has `test`: consider `npm test` or the focused documented test command.
+- Python repo has `pytest.ini` or tests: consider `pytest` from the documented working directory.
+- Python repo has Ruff/MyPy/Pyright config: consider the matching local command if installed.
 
 ### Running checks
 
 - Run clear, local, review-appropriate checks when they are safe and not obviously expensive.
 - Prefer the same checks CI runs when practical.
-- If commands are ambiguous, destructive, require external services, or look expensive, ask before running.
-- If no commands can be found, continue manual review and mark automated checks as `NOT FOUND`, not `FAIL`.
+- Prefer focused tests for the touched behavior, plus broader checks when scope/risk warrants it.
+- If commands are ambiguous, destructive, require external services/credentials, or look expensive, ask before running.
+- If no commands can be found for a relevant category, continue manual review and mark that category as `NOT FOUND`, not `FAIL`.
 - If a relevant discovered check fails, outcome is `BLOCKED` until the failure is resolved or the user explicitly scopes it out with justification.
 
-Record exact commands and pass/fail/not-run status.
+Record exact commands and pass/fail/not-run/not-found status by category.
 
 ---
 
@@ -247,6 +287,14 @@ For each section, mark `PASS`, `WARN`, `FAIL`, or `N/A`.
 - Documentation is updated when behavior, commands, or architecture changed.
 - Local guidance/constitution changes remain aligned and non-duplicative.
 
+### 10. Repo Standards Compliance
+
+- Discovered hard-rule documents were read and named in the report.
+- Changed code follows repo-specific engineering principles, architecture guidance, and domain terminology.
+- Any deviation from a discovered hard rule is explicitly justified in the intent source, implementation notes, or review report.
+- Missing or unrouted constitution/work-type context is disclosed without blocking manual review unless the repo requires a hard gate.
+- Standards violations are reported as defects even if tests, build, lint, and type checks pass.
+
 ---
 
 ## Phase 5: Determine Outcome
@@ -259,7 +307,7 @@ Use when review cannot safely proceed or merge must not happen:
 - Diff cannot be obtained or understood.
 - Required context is missing and cannot be reasonably inferred.
 - Security/authorization/data-loss risk is present.
-- Hard constitutional violation is present.
+- Hard constitutional or repo-standards violation is present.
 
 ### CHANGES REQUIRED
 
@@ -270,6 +318,7 @@ Use when implementation must be updated before approval:
 - Scope drift from available intent.
 - Non-blocking checklist `FAIL` findings.
 - Documentation missing for changed behavior or changed commands.
+- Repo-specific hard rules, engineering principles, or architecture standards are violated without an explicit accepted deviation.
 
 ### APPROVED
 
@@ -299,9 +348,19 @@ Intent source: {issue/PR/brief/commits/diff-only}
 Intent traceability: FULL | PARTIAL | UNAVAILABLE
 Change class: TRIVIAL NON-BEHAVIOR | BEHAVIOR | BUG FIX | STRUCTURAL REFACTOR | AMBIGUOUS
 
+STANDARDS LOADED
+────────────────
+- {AGENTS.md / CLAUDE.md / README.md / engineering-principles.md / constitution / docs/refactor-audit.md / none found}
+- Constitution routing: {loaded work type / no selector available / not found / not applicable}
+
 AUTOMATED CHECKS
 ────────────────
-{command}: PASS | FAIL | NOT RUN | NOT FOUND
+Tests: {command}: PASS | FAIL | NOT RUN | NOT FOUND
+Build: {command}: PASS | FAIL | NOT RUN | NOT FOUND
+Type checks: {command}: PASS | FAIL | NOT RUN | NOT FOUND
+Lint/static analysis: {command}: PASS | FAIL | NOT RUN | NOT FOUND
+Formatting: {command}: PASS | FAIL | NOT RUN | NOT FOUND | N/A
+Security/secret checks: {command}: PASS | FAIL | NOT RUN | NOT FOUND | N/A
 
 CHECKLIST RESULTS
 ─────────────────
@@ -314,6 +373,7 @@ CHECKLIST RESULTS
 7. Code Quality & Maintainability     PASS | WARN | FAIL | N/A
 8. User-Facing Behavior & A11y        PASS | WARN | FAIL | N/A
 9. Review Hygiene                     PASS | WARN | FAIL | N/A
+10. Repo Standards Compliance         PASS | WARN | FAIL | N/A
 
 FINDINGS
 ────────
@@ -344,7 +404,9 @@ SUMMARY
 - Enforce tests for behavior changes, bug fixes, and meaningful module seams.
 - Allow manual verification for trivial non-behavior edits.
 - Enforce Deep Modules as an architectural review gate.
-- Discover checks from repo guidance/manifests/CI.
+- Discover and enforce repo-specific hard-rule/standards/principles docs.
+- Discover checks from repo guidance/manifests/CI/config files.
+- Report tests, build, type checks, lint/static analysis, formatting, and security categories as `PASS`, `FAIL`, `NOT RUN`, `NOT FOUND`, or `N/A`.
 - Report exact file/line and concrete fixes for every `FAIL`.
 
 **DON'T:**
@@ -354,4 +416,6 @@ SUMMARY
 - Require new tests for obvious label/copy/docs/format-only changes.
 - Accept manual testing alone for behavior changes.
 - Approve shallow pass-through modules that hide no complexity.
+- Ignore repo-specific standards because generic tests passed.
+- Silently omit missing typecheck/lint/build categories.
 - Hardcode `api`, `app`, `npm`, `main`, or spec paths as universal assumptions.
