@@ -1,6 +1,6 @@
 {
   "name": "resources",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "sourceRepo": "https://github.com/alintawalshy66/resources",
   "description": "Canonical shared workflows for Pi, Claude Code, and Codex.",
   "portable": {
