@@ -173,15 +173,15 @@ Current behavior:
 - posts progress back to the parent
 - when all child issues are closed, posts the final summary and moves the parent to `status:review`
 
-## Branch cleanup preflight
+## Branch cleanup preflight report
 
 Before Crosby starts or resumes execution, it runs a blocking branch cleanup preflight.
-The report explains which branch state must be reviewed before the run can continue.
+The branch cleanup report explains which branch state must be reviewed before the run can continue.
 
 - **Base branch: main**.
 - Only local branches are reported; remote-only branches are not included in this check.
 - The report can list local branches that need manual review, such as stale parent or child work branches left from earlier runs.
-- No branches were changed by the preflight. Crosby reports the branch state and stops until a human decides what to keep, merge, rename, or remove.
+- Crosby does not modify branches during this preflight. It reports the branch state and stops until a human decides what to keep, merge, rename, or remove.
 - The documentation and report intentionally avoid deletion command examples because branch cleanup is a manual, explicit decision.
 
 ## Workflow states
