@@ -7,6 +7,7 @@ import {
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   buildRalphLoopPrompt,
+  classifyLocalBranches,
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
@@ -16,6 +17,8 @@ import {
   formatLifecycleStartedEvent,
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
+  renderBranchCleanupAdvisory,
+  assertNoLocalBranchCleanupRequired,
   parseIssueTestCommand,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -23,6 +26,194 @@ import {
   runWatchCycle,
   runWatchMode,
 } from "./lib-v2.mjs";
+
+test("classifyLocalBranches excludes main and assigns cleanup recommendations without mutating branch facts", () => {
+  const branchFacts = [
+    {
+      name: "main",
+      merged: false,
+      upstream: "origin/main",
+      lastCommitDate: "2024-01-01T00:00:00.000Z",
+    },
+    {
+      name: "merged-feature",
+      merged: true,
+      upstream: "origin/merged-feature",
+      lastCommitDate: "2024-12-20T00:00:00.000Z",
+    },
+    {
+      name: "missing-upstream",
+      merged: false,
+      upstream: null,
+      lastCommitDate: "2024-12-28T00:00:00.000Z",
+    },
+    {
+      name: "stale-feature",
+      merged: false,
+      upstream: "origin/stale-feature",
+      lastCommitDate: "2024-11-17T00:00:00.000Z",
+    },
+    {
+      name: "very-stale-feature",
+      merged: false,
+      upstream: "origin/very-stale-feature",
+      lastCommitDate: "2024-09-23T00:00:00.000Z",
+    },
+    {
+      name: "active-feature",
+      merged: false,
+      upstream: "origin/active-feature",
+      lastCommitDate: "2024-12-27T00:00:00.000Z",
+    },
+    {
+      name: "missing-upstream-beats-age",
+      merged: false,
+      upstream: "",
+      lastCommitDate: "2024-08-24T00:00:00.000Z",
+    },
+  ];
+  const originalFacts = structuredClone(branchFacts);
+
+  const classified = classifyLocalBranches(branchFacts, {
+    now: new Date("2025-01-01T00:00:00.000Z"),
+  });
+
+  assert.deepEqual(branchFacts, originalFacts);
+  assert.deepEqual(
+    classified.map((branch) => [branch.name, branch.recommendation]),
+    [
+      ["merged-feature", "Delete local copy"],
+      ["missing-upstream", "Needs attention"],
+      ["stale-feature", "Stale review"],
+      ["very-stale-feature", "Very stale review"],
+      ["active-feature", "Keep"],
+      ["missing-upstream-beats-age", "Needs attention"],
+    ],
+  );
+});
+
+test("renderBranchCleanupAdvisory formats a sorted non-destructive blocking cleanup table", () => {
+  const output = renderBranchCleanupAdvisory(
+    [
+      {
+        name: "keep/recent",
+        merged: false,
+        upstream: "origin/keep/recent",
+        lastCommitDate: "2024-12-25T00:00:00.000Z",
+      },
+      {
+        name: "merged/done",
+        merged: true,
+        upstream: "origin/merged/done",
+        lastCommitDate: "2024-11-20T00:00:00.000Z",
+      },
+      {
+        name: "spike/stale",
+        merged: false,
+        upstream: "origin/spike/stale",
+        lastCommitDate: "2024-10-19T00:00:00.000Z",
+      },
+      {
+        name: "feature/current",
+        current: true,
+        merged: false,
+        upstream: "origin/feature/current",
+        ahead: 3,
+        lastCommitDate: "2024-12-29T00:00:00.000Z",
+      },
+      {
+        name: "old/missing-upstream-newer",
+        merged: false,
+        upstream: "",
+        lastCommitDate: "2024-09-28T00:00:00.000Z",
+      },
+      {
+        name: "old/missing-upstream-older",
+        merged: false,
+        upstream: null,
+        lastCommitDate: "2024-09-03T00:00:00.000Z",
+      },
+      {
+        name: "spike/very-stale",
+        merged: false,
+        upstream: "origin/spike/very-stale",
+        lastCommitDate: "2024-09-13T00:00:00.000Z",
+      },
+    ],
+    { now: new Date("2025-01-01T00:00:00.000Z"), baseBranch: "main" },
+  );
+
+  assert.match(output, /Blocked: branch cleanup required before starting Crosby\./);
+  assert.match(output, /Base branch: main/);
+  assert.match(output, /No branches were changed\./);
+  assert.match(output, /Recommendation\s+Branch\s+Age\s+Reason\s+Suggested action/);
+  assert.doesNotMatch(output, /git branch -[dD]\b/);
+
+  const currentIndex = output.indexOf("* feature/current");
+  const needsOlderIndex = output.indexOf("old/missing-upstream-older");
+  const needsNewerIndex = output.indexOf("old/missing-upstream-newer");
+  const veryStaleIndex = output.indexOf("spike/very-stale");
+  const staleIndex = output.indexOf("spike/stale");
+  const deleteIndex = output.indexOf("merged/done");
+  const keepIndex = output.indexOf("keep/recent");
+
+  assert.ok(currentIndex > -1);
+  assert.ok(currentIndex < needsOlderIndex);
+  assert.ok(needsOlderIndex < needsNewerIndex);
+  assert.ok(needsNewerIndex < veryStaleIndex);
+  assert.ok(veryStaleIndex < staleIndex);
+  assert.ok(staleIndex < deleteIndex);
+  assert.ok(deleteIndex < keepIndex);
+  assert.match(output, /current branch; 3 ahead main/);
+  assert.match(output, /unmerged into main; upstream missing/);
+  assert.match(output, /Review, then remove local copy/);
+});
+
+test("assertNoLocalBranchCleanupRequired blocks with the cleanup advisory for non-main local branches", () => {
+  assert.throws(
+    () =>
+      assertNoLocalBranchCleanupRequired(
+        [
+          {
+            name: "main",
+            current: false,
+            merged: false,
+            upstream: "origin/main",
+            lastCommitDate: "2024-12-30T00:00:00.000Z",
+          },
+          {
+            name: "current-work",
+            current: true,
+            merged: false,
+            upstream: "origin/current-work",
+            ahead: 2,
+            lastCommitDate: "2024-12-31T00:00:00.000Z",
+          },
+        ],
+        { now: new Date("2025-01-01T00:00:00.000Z"), baseBranch: "main" },
+      ),
+    (error) => {
+      assert.match(error.message, /Blocked: branch cleanup required before starting Crosby\./);
+      assert.match(error.message, /\* current-work/);
+      assert.doesNotMatch(error.message, /\bmain\b.*origin\/main/);
+      return true;
+    },
+  );
+});
+
+test("assertNoLocalBranchCleanupRequired passes when only local main is present", () => {
+  assert.doesNotThrow(() =>
+    assertNoLocalBranchCleanupRequired([
+      {
+        name: "main",
+        current: true,
+        merged: false,
+        upstream: "origin/main",
+        lastCommitDate: "2024-12-30T00:00:00.000Z",
+      },
+    ]),
+  );
+});
 
 test("formatLifecycleStartedEvent and formatLifecycleFinishedEvent normalize worker lifecycle updates into short events", () => {
   assert.equal(formatLifecycleStartedEvent("#135"), "#135 started");
@@ -683,6 +874,98 @@ test("runQueueExecution downgrades done worker results to review when no new com
   assert.match(progressComment, /Status: Review/);
   assert.match(progressComment, /No new commit found on issue-129-symphony/);
   assert.match(progressComment, /commit the completed work/i);
+});
+
+test("runQueueExecution runs branch cleanup preflight before mutating git state", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    () =>
+      runQueueExecution(
+        {
+          parent: {
+            identifier: "#129",
+            title: "Symphony",
+            branchName: "issue-129-symphony",
+            state: { name: "Execute", type: "started" },
+            labels: { nodes: [{ name: "resources" }] },
+          },
+          children: [
+            {
+              identifier: "#135",
+              title: "Implement dashboard",
+              state: { name: "Ready to Build", type: "unstarted" },
+            },
+          ],
+        },
+        {
+          routing: {
+            documentsRoot: "/home/walsc0",
+            projectsRoot: "/home/walsc0/projects",
+            folderExists: (p) => /projects\/resources$/i.test(p),
+          },
+          assertBranchCleanupPreflight: async ({ cwd }) => {
+            calls.push(["branchCleanupPreflight", cwd]);
+            throw new Error("Blocked: branch cleanup required before starting Crosby.");
+          },
+          ensureParentBranch: async () => calls.push(["ensureParentBranch"]),
+          prepareChildBranch: async () => calls.push(["prepareChildBranch"]),
+          moveIssue: async () => calls.push(["moveIssue"]),
+          runWorker: async () => calls.push(["runWorker"]),
+        },
+      ),
+    /branch cleanup required/i,
+  );
+
+  assert.deepEqual(calls, [["branchCleanupPreflight", "/home/walsc0/projects/resources"]]);
+});
+
+test("runQueueExecution preserves existing branch preparation blocking after branch preflight passes", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    () =>
+      runQueueExecution(
+        {
+          parent: {
+            identifier: "#129",
+            title: "Symphony",
+            branchName: "issue-129-symphony",
+            state: { name: "Execute", type: "started" },
+            labels: { nodes: [{ name: "resources" }] },
+          },
+          children: [
+            {
+              identifier: "#135",
+              title: "Implement dashboard",
+              state: { name: "Ready to Build", type: "unstarted" },
+            },
+          ],
+        },
+        {
+          routing: {
+            documentsRoot: "/home/walsc0",
+            projectsRoot: "/home/walsc0/projects",
+            folderExists: (p) => /projects\/resources$/i.test(p),
+          },
+          assertBranchCleanupPreflight: async () => calls.push(["branchCleanupPreflight"]),
+          ensureParentBranch: async () => calls.push(["ensureParentBranch"]),
+          prepareChildBranch: async () => {
+            calls.push(["prepareChildBranch"]);
+            throw new Error("Cannot create child branch because the working tree has uncommitted changes.");
+          },
+          moveIssue: async () => calls.push(["moveIssue"]),
+          runWorker: async () => calls.push(["runWorker"]),
+        },
+      ),
+    /working tree has uncommitted changes/i,
+  );
+
+  assert.deepEqual(calls, [
+    ["branchCleanupPreflight"],
+    ["ensureParentBranch"],
+    ["prepareChildBranch"],
+  ]);
 });
 
 test("runQueueExecution verifies and merges child branch before closing a child", async () => {

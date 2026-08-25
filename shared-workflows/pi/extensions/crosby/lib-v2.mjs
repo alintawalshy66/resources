@@ -427,6 +427,215 @@ function orderRunnableChildren(runnable) {
   return ordered;
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function getLocalBranchName(branch) {
+  return String(branch?.name ?? branch?.branch ?? branch?.refName ?? "").trim();
+}
+
+function hasConfiguredUpstream(branch) {
+  const upstream = branch?.upstream ?? branch?.upstreamName ?? branch?.tracking;
+  if (typeof upstream === "string") return upstream.trim().length > 0;
+  return upstream !== undefined && upstream !== null;
+}
+
+function getBranchLastCommitDate(branch) {
+  const rawDate =
+    branch?.lastCommitDate ??
+    branch?.committerDate ??
+    branch?.committedDate ??
+    branch?.updatedAt;
+  if (!rawDate) return null;
+
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getBranchAgeDays(branch, now) {
+  const lastCommitDate = getBranchLastCommitDate(branch);
+  if (!lastCommitDate) return null;
+  return Math.max(0, Math.floor((now.getTime() - lastCommitDate.getTime()) / MS_PER_DAY));
+}
+
+function classifyLocalBranch(branch, now) {
+  if (branch?.merged === true || branch?.isMerged === true) {
+    return "Delete local copy";
+  }
+
+  if (!hasConfiguredUpstream(branch)) {
+    return "Needs attention";
+  }
+
+  const ageDays = getBranchAgeDays(branch, now);
+  if (ageDays !== null && ageDays >= 90) return "Very stale review";
+  if (ageDays !== null && ageDays >= 30) return "Stale review";
+
+  return "Keep";
+}
+
+export function classifyLocalBranches(branches, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
+
+  return (Array.isArray(branches) ? branches : [])
+    .filter((branch) => getLocalBranchName(branch) !== "main")
+    .map((branch) => ({
+      ...branch,
+      name: getLocalBranchName(branch),
+      daysSinceLastCommit: getBranchAgeDays(branch, now),
+      recommendation: classifyLocalBranch(branch, now),
+    }));
+}
+
+const BRANCH_RECOMMENDATION_RANK = new Map([
+  ["Needs attention", 1],
+  ["Very stale review", 2],
+  ["Stale review", 3],
+  ["Delete local copy", 4],
+  ["Keep", 5],
+]);
+
+function isCurrentLocalBranch(branch) {
+  return branch?.current === true || branch?.isCurrent === true || branch?.head === true;
+}
+
+function getBranchAgeSortValue(branch) {
+  return Number.isFinite(branch?.daysSinceLastCommit)
+    ? branch.daysSinceLastCommit
+    : -1;
+}
+
+function sortBranchRecommendations(a, b) {
+  const aCurrent = isCurrentLocalBranch(a);
+  const bCurrent = isCurrentLocalBranch(b);
+  if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+
+  const rankDiff =
+    (BRANCH_RECOMMENDATION_RANK.get(a.recommendation) ?? Number.MAX_SAFE_INTEGER) -
+    (BRANCH_RECOMMENDATION_RANK.get(b.recommendation) ?? Number.MAX_SAFE_INTEGER);
+  if (rankDiff !== 0) return rankDiff;
+
+  const ageDiff = getBranchAgeSortValue(b) - getBranchAgeSortValue(a);
+  if (ageDiff !== 0) return ageDiff;
+
+  return a.name.localeCompare(b.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function formatBranchAge(branch) {
+  return Number.isFinite(branch?.daysSinceLastCommit)
+    ? `${branch.daysSinceLastCommit}d`
+    : "unknown";
+}
+
+function getBranchAheadCount(branch) {
+  for (const key of ["ahead", "aheadCount", "commitsAhead", "aheadBy"]) {
+    if (Number.isFinite(branch?.[key])) return branch[key];
+  }
+  return null;
+}
+
+function buildBranchReason(branch, baseBranch) {
+  if (isCurrentLocalBranch(branch)) {
+    const aheadCount = getBranchAheadCount(branch);
+    const details = ["current branch"];
+    if (aheadCount !== null) details.push(`${aheadCount} ahead ${baseBranch}`);
+    return details.join("; ");
+  }
+
+  if (branch.recommendation === "Needs attention") {
+    return `unmerged into ${baseBranch}; upstream missing`;
+  }
+
+  if (
+    branch.recommendation === "Very stale review" ||
+    branch.recommendation === "Stale review"
+  ) {
+    return `unmerged into ${baseBranch}`;
+  }
+
+  if (branch.recommendation === "Delete local copy") {
+    return `merged into ${baseBranch}`;
+  }
+
+  return "recent or active";
+}
+
+function buildBranchSuggestedAction(branch) {
+  if (isCurrentLocalBranch(branch)) return "Finish/PR this work or switch to main";
+
+  if (branch.recommendation === "Needs attention") {
+    return "Inspect manually; may be forgotten work or squash-merged";
+  }
+
+  if (
+    branch.recommendation === "Very stale review" ||
+    branch.recommendation === "Stale review"
+  ) {
+    return "Decide whether to keep or retire";
+  }
+
+  if (branch.recommendation === "Delete local copy") {
+    return "Review, then remove local copy";
+  }
+
+  return "Keep or finish/PR when ready";
+}
+
+function formatPaddedTable(headers, rows) {
+  const widths = headers.map((header, index) =>
+    Math.max(
+      header.length,
+      ...rows.map((row) => String(row[index] ?? "").length),
+    ),
+  );
+  const formatRow = (row) =>
+    row.map((cell, index) => String(cell ?? "").padEnd(widths[index])).join("  ").trimEnd();
+
+  return [
+    formatRow(headers),
+    formatRow(widths.map((width) => "-".repeat(width))),
+    ...rows.map(formatRow),
+  ].join("\n");
+}
+
+function getBranchCleanupRows(branches, options = {}) {
+  const baseBranch = String(options.baseBranch ?? "main").trim() || "main";
+  return classifyLocalBranches(branches, options)
+    .sort(sortBranchRecommendations)
+    .map((branch) => [
+      branch.recommendation,
+      `${isCurrentLocalBranch(branch) ? "* " : ""}${branch.name}`,
+      formatBranchAge(branch),
+      buildBranchReason(branch, baseBranch),
+      buildBranchSuggestedAction(branch),
+    ]);
+}
+
+export function renderBranchCleanupAdvisory(branches, options = {}) {
+  const baseBranch = String(options.baseBranch ?? "main").trim() || "main";
+  const rows = getBranchCleanupRows(branches, options);
+
+  const table = formatPaddedTable(
+    ["Recommendation", "Branch", "Age", "Reason", "Suggested action"],
+    rows,
+  );
+
+  return [
+    "Blocked: branch cleanup required before starting Crosby.",
+    `Base branch: ${baseBranch}`,
+    "No branches were changed.",
+    "",
+    table,
+  ].join("\n");
+}
+
+export function assertNoLocalBranchCleanupRequired(branches, options = {}) {
+  if (getBranchCleanupRows(branches, options).length === 0) return;
+  throw new Error(renderBranchCleanupAdvisory(branches, options));
+}
+
 export function classifyChildIssues(children) {
   const runnable = [];
   const nonRunnable = [];
@@ -1739,10 +1948,34 @@ export async function runSingleChildExecution(queue, operations) {
   };
 }
 
+async function runBranchCleanupPreflight(queue, operations) {
+  if (typeof operations.assertBranchCleanupPreflight !== "function") return;
+
+  const classification = classifyChildIssues(queue?.children ?? []);
+  if (classification.runnable.length === 0) return;
+
+  const { child, path } = await resolveExecutableIssuePath(queue, operations);
+  const topLevelChild = path[0] ?? child;
+  const routingTarget = getExecutionRoutingTarget(queue, topLevelChild);
+  const routing = routingTarget
+    ? resolveIssueWorkingDirectory(routingTarget, operations.routing)
+    : null;
+
+  await operations.assertBranchCleanupPreflight({
+    parent: queue.parent,
+    child,
+    topLevelChild,
+    path,
+    cwd: routing?.cwd,
+  });
+}
+
 export async function runQueueExecution(initialQueue, operations) {
   const completedChildren = [];
   let queue = initialQueue;
   let movedParentToBuilding = false;
+
+  await runBranchCleanupPreflight(queue, operations);
 
   while (true) {
     assertNoConcurrentSupervisor(queue);
@@ -1856,7 +2089,16 @@ export async function runWatchCycle(operations) {
     const routingTarget = getExecutionRoutingTarget(queue, child);
     if (routingTarget) {
       try {
-        resolveIssueWorkingDirectory(routingTarget, operations.routing);
+        const routing = resolveIssueWorkingDirectory(routingTarget, operations.routing);
+        if (typeof operations.assertBranchCleanupPreflight === "function") {
+          await operations.assertBranchCleanupPreflight({
+            parent: queue.parent,
+            child,
+            topLevelChild: child,
+            path: [child],
+            cwd: routing?.cwd,
+          });
+        }
       } catch (error) {
         routingErrors.push({
           issue: queue.parent,
