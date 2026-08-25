@@ -486,6 +486,146 @@ export function classifyLocalBranches(branches, options = {}) {
     }));
 }
 
+const BRANCH_RECOMMENDATION_RANK = new Map([
+  ["Needs attention", 1],
+  ["Very stale review", 2],
+  ["Stale review", 3],
+  ["Delete local copy", 4],
+  ["Keep", 5],
+]);
+
+function isCurrentLocalBranch(branch) {
+  return branch?.current === true || branch?.isCurrent === true || branch?.head === true;
+}
+
+function getBranchAgeSortValue(branch) {
+  return Number.isFinite(branch?.daysSinceLastCommit)
+    ? branch.daysSinceLastCommit
+    : -1;
+}
+
+function sortBranchRecommendations(a, b) {
+  const aCurrent = isCurrentLocalBranch(a);
+  const bCurrent = isCurrentLocalBranch(b);
+  if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+
+  const rankDiff =
+    (BRANCH_RECOMMENDATION_RANK.get(a.recommendation) ?? Number.MAX_SAFE_INTEGER) -
+    (BRANCH_RECOMMENDATION_RANK.get(b.recommendation) ?? Number.MAX_SAFE_INTEGER);
+  if (rankDiff !== 0) return rankDiff;
+
+  const ageDiff = getBranchAgeSortValue(b) - getBranchAgeSortValue(a);
+  if (ageDiff !== 0) return ageDiff;
+
+  return a.name.localeCompare(b.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function formatBranchAge(branch) {
+  return Number.isFinite(branch?.daysSinceLastCommit)
+    ? `${branch.daysSinceLastCommit}d`
+    : "unknown";
+}
+
+function getBranchAheadCount(branch) {
+  for (const key of ["ahead", "aheadCount", "commitsAhead", "aheadBy"]) {
+    if (Number.isFinite(branch?.[key])) return branch[key];
+  }
+  return null;
+}
+
+function buildBranchReason(branch, baseBranch) {
+  if (isCurrentLocalBranch(branch)) {
+    const aheadCount = getBranchAheadCount(branch);
+    const details = ["current branch"];
+    if (aheadCount !== null) details.push(`${aheadCount} ahead ${baseBranch}`);
+    return details.join("; ");
+  }
+
+  if (branch.recommendation === "Needs attention") {
+    return `unmerged into ${baseBranch}; upstream missing`;
+  }
+
+  if (
+    branch.recommendation === "Very stale review" ||
+    branch.recommendation === "Stale review"
+  ) {
+    return `unmerged into ${baseBranch}`;
+  }
+
+  if (branch.recommendation === "Delete local copy") {
+    return `merged into ${baseBranch}`;
+  }
+
+  return "recent or active";
+}
+
+function buildBranchSuggestedAction(branch) {
+  if (isCurrentLocalBranch(branch)) return "Finish/PR this work or switch to main";
+
+  if (branch.recommendation === "Needs attention") {
+    return "Inspect manually; may be forgotten work or squash-merged";
+  }
+
+  if (
+    branch.recommendation === "Very stale review" ||
+    branch.recommendation === "Stale review"
+  ) {
+    return "Decide whether to keep or retire";
+  }
+
+  if (branch.recommendation === "Delete local copy") {
+    return "Review, then remove local copy";
+  }
+
+  return "Keep or finish/PR when ready";
+}
+
+function formatPaddedTable(headers, rows) {
+  const widths = headers.map((header, index) =>
+    Math.max(
+      header.length,
+      ...rows.map((row) => String(row[index] ?? "").length),
+    ),
+  );
+  const formatRow = (row) =>
+    row.map((cell, index) => String(cell ?? "").padEnd(widths[index])).join("  ").trimEnd();
+
+  return [
+    formatRow(headers),
+    formatRow(widths.map((width) => "-".repeat(width))),
+    ...rows.map(formatRow),
+  ].join("\n");
+}
+
+export function renderBranchCleanupAdvisory(branches, options = {}) {
+  const baseBranch = String(options.baseBranch ?? "main").trim() || "main";
+  const rows = classifyLocalBranches(branches, options)
+    .sort(sortBranchRecommendations)
+    .map((branch) => [
+      branch.recommendation,
+      `${isCurrentLocalBranch(branch) ? "* " : ""}${branch.name}`,
+      formatBranchAge(branch),
+      buildBranchReason(branch, baseBranch),
+      buildBranchSuggestedAction(branch),
+    ]);
+
+  const table = formatPaddedTable(
+    ["Recommendation", "Branch", "Age", "Reason", "Suggested action"],
+    rows,
+  );
+
+  return [
+    "Blocked: branch cleanup required before starting Crosby.",
+    `Base branch: ${baseBranch}`,
+    "No branches were changed.",
+    "",
+    table,
+  ].join("\n");
+}
+
 export function classifyChildIssues(children) {
   const runnable = [];
   const nonRunnable = [];

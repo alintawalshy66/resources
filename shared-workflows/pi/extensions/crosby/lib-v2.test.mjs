@@ -17,6 +17,7 @@ import {
   formatLifecycleStartedEvent,
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
+  renderBranchCleanupAdvisory,
   parseIssueTestCommand,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -88,6 +89,83 @@ test("classifyLocalBranches excludes main and assigns cleanup recommendations wi
       ["missing-upstream-beats-age", "Needs attention"],
     ],
   );
+});
+
+test("renderBranchCleanupAdvisory formats a sorted non-destructive blocking cleanup table", () => {
+  const output = renderBranchCleanupAdvisory(
+    [
+      {
+        name: "keep/recent",
+        merged: false,
+        upstream: "origin/keep/recent",
+        lastCommitDate: "2024-12-25T00:00:00.000Z",
+      },
+      {
+        name: "merged/done",
+        merged: true,
+        upstream: "origin/merged/done",
+        lastCommitDate: "2024-11-20T00:00:00.000Z",
+      },
+      {
+        name: "spike/stale",
+        merged: false,
+        upstream: "origin/spike/stale",
+        lastCommitDate: "2024-10-19T00:00:00.000Z",
+      },
+      {
+        name: "feature/current",
+        current: true,
+        merged: false,
+        upstream: "origin/feature/current",
+        ahead: 3,
+        lastCommitDate: "2024-12-29T00:00:00.000Z",
+      },
+      {
+        name: "old/missing-upstream-newer",
+        merged: false,
+        upstream: "",
+        lastCommitDate: "2024-09-28T00:00:00.000Z",
+      },
+      {
+        name: "old/missing-upstream-older",
+        merged: false,
+        upstream: null,
+        lastCommitDate: "2024-09-03T00:00:00.000Z",
+      },
+      {
+        name: "spike/very-stale",
+        merged: false,
+        upstream: "origin/spike/very-stale",
+        lastCommitDate: "2024-09-13T00:00:00.000Z",
+      },
+    ],
+    { now: new Date("2025-01-01T00:00:00.000Z"), baseBranch: "main" },
+  );
+
+  assert.match(output, /Blocked: branch cleanup required before starting Crosby\./);
+  assert.match(output, /Base branch: main/);
+  assert.match(output, /No branches were changed\./);
+  assert.match(output, /Recommendation\s+Branch\s+Age\s+Reason\s+Suggested action/);
+  assert.doesNotMatch(output, /git branch -[dD]\b/);
+
+  const currentIndex = output.indexOf("* feature/current");
+  const needsOlderIndex = output.indexOf("old/missing-upstream-older");
+  const needsNewerIndex = output.indexOf("old/missing-upstream-newer");
+  const veryStaleIndex = output.indexOf("spike/very-stale");
+  const staleIndex = output.indexOf("spike/stale");
+  const deleteIndex = output.indexOf("merged/done");
+  const keepIndex = output.indexOf("keep/recent");
+
+  assert.ok(currentIndex > -1);
+  assert.ok(currentIndex < needsOlderIndex);
+  assert.ok(needsOlderIndex < needsNewerIndex);
+  assert.ok(needsNewerIndex < veryStaleIndex);
+  assert.ok(veryStaleIndex < staleIndex);
+  assert.ok(staleIndex < deleteIndex);
+  assert.ok(deleteIndex < keepIndex);
+  assert.match(output, /current branch; 3 ahead main/);
+  assert.match(output, /unmerged into main; upstream missing/);
+  assert.match(output, /Review, then remove local copy/);
 });
 
 test("formatLifecycleStartedEvent and formatLifecycleFinishedEvent normalize worker lifecycle updates into short events", () => {
