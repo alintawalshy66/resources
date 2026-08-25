@@ -18,6 +18,7 @@ import {
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
   renderBranchCleanupAdvisory,
+  assertNoLocalBranchCleanupRequired,
   parseIssueTestCommand,
   publishParentPullRequest,
   reviewParentPullRequest,
@@ -166,6 +167,52 @@ test("renderBranchCleanupAdvisory formats a sorted non-destructive blocking clea
   assert.match(output, /current branch; 3 ahead main/);
   assert.match(output, /unmerged into main; upstream missing/);
   assert.match(output, /Review, then remove local copy/);
+});
+
+test("assertNoLocalBranchCleanupRequired blocks with the cleanup advisory for non-main local branches", () => {
+  assert.throws(
+    () =>
+      assertNoLocalBranchCleanupRequired(
+        [
+          {
+            name: "main",
+            current: false,
+            merged: false,
+            upstream: "origin/main",
+            lastCommitDate: "2024-12-30T00:00:00.000Z",
+          },
+          {
+            name: "current-work",
+            current: true,
+            merged: false,
+            upstream: "origin/current-work",
+            ahead: 2,
+            lastCommitDate: "2024-12-31T00:00:00.000Z",
+          },
+        ],
+        { now: new Date("2025-01-01T00:00:00.000Z"), baseBranch: "main" },
+      ),
+    (error) => {
+      assert.match(error.message, /Blocked: branch cleanup required before starting Crosby\./);
+      assert.match(error.message, /\* current-work/);
+      assert.doesNotMatch(error.message, /\bmain\b.*origin\/main/);
+      return true;
+    },
+  );
+});
+
+test("assertNoLocalBranchCleanupRequired passes when only local main is present", () => {
+  assert.doesNotThrow(() =>
+    assertNoLocalBranchCleanupRequired([
+      {
+        name: "main",
+        current: true,
+        merged: false,
+        upstream: "origin/main",
+        lastCommitDate: "2024-12-30T00:00:00.000Z",
+      },
+    ]),
+  );
 });
 
 test("formatLifecycleStartedEvent and formatLifecycleFinishedEvent normalize worker lifecycle updates into short events", () => {
@@ -827,6 +874,98 @@ test("runQueueExecution downgrades done worker results to review when no new com
   assert.match(progressComment, /Status: Review/);
   assert.match(progressComment, /No new commit found on issue-129-symphony/);
   assert.match(progressComment, /commit the completed work/i);
+});
+
+test("runQueueExecution runs branch cleanup preflight before mutating git state", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    () =>
+      runQueueExecution(
+        {
+          parent: {
+            identifier: "#129",
+            title: "Symphony",
+            branchName: "issue-129-symphony",
+            state: { name: "Execute", type: "started" },
+            labels: { nodes: [{ name: "resources" }] },
+          },
+          children: [
+            {
+              identifier: "#135",
+              title: "Implement dashboard",
+              state: { name: "Ready to Build", type: "unstarted" },
+            },
+          ],
+        },
+        {
+          routing: {
+            documentsRoot: "/home/walsc0",
+            projectsRoot: "/home/walsc0/projects",
+            folderExists: (p) => /projects\/resources$/i.test(p),
+          },
+          assertBranchCleanupPreflight: async ({ cwd }) => {
+            calls.push(["branchCleanupPreflight", cwd]);
+            throw new Error("Blocked: branch cleanup required before starting Crosby.");
+          },
+          ensureParentBranch: async () => calls.push(["ensureParentBranch"]),
+          prepareChildBranch: async () => calls.push(["prepareChildBranch"]),
+          moveIssue: async () => calls.push(["moveIssue"]),
+          runWorker: async () => calls.push(["runWorker"]),
+        },
+      ),
+    /branch cleanup required/i,
+  );
+
+  assert.deepEqual(calls, [["branchCleanupPreflight", "/home/walsc0/projects/resources"]]);
+});
+
+test("runQueueExecution preserves existing branch preparation blocking after branch preflight passes", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    () =>
+      runQueueExecution(
+        {
+          parent: {
+            identifier: "#129",
+            title: "Symphony",
+            branchName: "issue-129-symphony",
+            state: { name: "Execute", type: "started" },
+            labels: { nodes: [{ name: "resources" }] },
+          },
+          children: [
+            {
+              identifier: "#135",
+              title: "Implement dashboard",
+              state: { name: "Ready to Build", type: "unstarted" },
+            },
+          ],
+        },
+        {
+          routing: {
+            documentsRoot: "/home/walsc0",
+            projectsRoot: "/home/walsc0/projects",
+            folderExists: (p) => /projects\/resources$/i.test(p),
+          },
+          assertBranchCleanupPreflight: async () => calls.push(["branchCleanupPreflight"]),
+          ensureParentBranch: async () => calls.push(["ensureParentBranch"]),
+          prepareChildBranch: async () => {
+            calls.push(["prepareChildBranch"]);
+            throw new Error("Cannot create child branch because the working tree has uncommitted changes.");
+          },
+          moveIssue: async () => calls.push(["moveIssue"]),
+          runWorker: async () => calls.push(["runWorker"]),
+        },
+      ),
+    /working tree has uncommitted changes/i,
+  );
+
+  assert.deepEqual(calls, [
+    ["branchCleanupPreflight"],
+    ["ensureParentBranch"],
+    ["prepareChildBranch"],
+  ]);
 });
 
 test("runQueueExecution verifies and merges child branch before closing a child", async () => {

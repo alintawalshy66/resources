@@ -18,6 +18,7 @@ import {
   renderCrosbyDashboard,
 } from "./dashboard.mjs";
 import {
+  assertNoLocalBranchCleanupRequired,
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   fetchParentQueue,
@@ -774,6 +775,82 @@ async function hasRemoteGitBranch(
 async function hasUncommittedGitChanges(pi: ExtensionAPI, cwd: string) {
   const result = await execGit(pi, ["status", "--short"], cwd);
   return result.stdout.trim().length > 0;
+}
+
+async function loadLocalBranchCleanupFacts(
+  pi: ExtensionAPI,
+  cwd: string,
+  baseBranch = "main",
+) {
+  const branchList = await execGit(
+    pi,
+    [
+      "for-each-ref",
+      "--format=%(refname:short)%09%(upstream:short)%09%(committerdate:iso8601-strict)%09%(HEAD)",
+      "refs/heads",
+    ],
+    cwd,
+  );
+  const currentBranch = await getCurrentGitBranch(pi, cwd);
+  const merged = await execGit(
+    pi,
+    ["branch", "--merged", baseBranch, "--format=%(refname:short)"],
+    cwd,
+  );
+  const mergedBranches = new Set(
+    merged.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim().replace(/^\*\s*/, ""))
+      .filter(Boolean),
+  );
+
+  return Promise.all(
+    branchList.stdout
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+      .map(async (line) => {
+        const [name = "", upstream = "", lastCommitDate = "", head = ""] =
+          line.split("\t");
+        const isCurrent = head.trim() === "*" || name === currentBranch;
+        let ahead = null;
+        if (isCurrent && name !== baseBranch) {
+          try {
+            const aheadResult = await execGit(
+              pi,
+              ["rev-list", "--count", `${baseBranch}..${name}`],
+              cwd,
+            );
+            const parsedAhead = Number.parseInt(aheadResult.stdout.trim(), 10);
+            ahead = Number.isFinite(parsedAhead) ? parsedAhead : null;
+          } catch {
+            ahead = null;
+          }
+        }
+
+        return {
+          name,
+          upstream,
+          lastCommitDate: lastCommitDate || null,
+          current: isCurrent,
+          merged: mergedBranches.has(name),
+          ahead,
+        };
+      }),
+  );
+}
+
+async function assertBranchCleanupPreflight(
+  pi: ExtensionAPI,
+  cwd: string | undefined,
+) {
+  if (!cwd) {
+    throw new Error(
+      "Cannot run Crosby branch cleanup preflight because no local project directory was resolved.",
+    );
+  }
+
+  const branches = await loadLocalBranchCleanupFacts(pi, cwd, "main");
+  assertNoLocalBranchCleanupRequired(branches, { baseBranch: "main" });
 }
 
 async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
@@ -1783,6 +1860,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
+              assertBranchCleanupPreflight: ({ cwd }) =>
+                assertBranchCleanupPreflight(pi, cwd),
               prepareChildBranch: ({ parent, child, cwd }) =>
                 prepareChildBranch(pi, parent, child, cwd),
               snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
@@ -1980,6 +2059,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
+          assertBranchCleanupPreflight: ({ cwd }) =>
+            assertBranchCleanupPreflight(pi, cwd),
           prepareChildBranch: ({ parent, child, cwd }) =>
             prepareChildBranch(pi, parent, child, cwd),
           snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),

@@ -600,9 +600,9 @@ function formatPaddedTable(headers, rows) {
   ].join("\n");
 }
 
-export function renderBranchCleanupAdvisory(branches, options = {}) {
+function getBranchCleanupRows(branches, options = {}) {
   const baseBranch = String(options.baseBranch ?? "main").trim() || "main";
-  const rows = classifyLocalBranches(branches, options)
+  return classifyLocalBranches(branches, options)
     .sort(sortBranchRecommendations)
     .map((branch) => [
       branch.recommendation,
@@ -611,6 +611,11 @@ export function renderBranchCleanupAdvisory(branches, options = {}) {
       buildBranchReason(branch, baseBranch),
       buildBranchSuggestedAction(branch),
     ]);
+}
+
+export function renderBranchCleanupAdvisory(branches, options = {}) {
+  const baseBranch = String(options.baseBranch ?? "main").trim() || "main";
+  const rows = getBranchCleanupRows(branches, options);
 
   const table = formatPaddedTable(
     ["Recommendation", "Branch", "Age", "Reason", "Suggested action"],
@@ -624,6 +629,11 @@ export function renderBranchCleanupAdvisory(branches, options = {}) {
     "",
     table,
   ].join("\n");
+}
+
+export function assertNoLocalBranchCleanupRequired(branches, options = {}) {
+  if (getBranchCleanupRows(branches, options).length === 0) return;
+  throw new Error(renderBranchCleanupAdvisory(branches, options));
 }
 
 export function classifyChildIssues(children) {
@@ -1938,10 +1948,34 @@ export async function runSingleChildExecution(queue, operations) {
   };
 }
 
+async function runBranchCleanupPreflight(queue, operations) {
+  if (typeof operations.assertBranchCleanupPreflight !== "function") return;
+
+  const classification = classifyChildIssues(queue?.children ?? []);
+  if (classification.runnable.length === 0) return;
+
+  const { child, path } = await resolveExecutableIssuePath(queue, operations);
+  const topLevelChild = path[0] ?? child;
+  const routingTarget = getExecutionRoutingTarget(queue, topLevelChild);
+  const routing = routingTarget
+    ? resolveIssueWorkingDirectory(routingTarget, operations.routing)
+    : null;
+
+  await operations.assertBranchCleanupPreflight({
+    parent: queue.parent,
+    child,
+    topLevelChild,
+    path,
+    cwd: routing?.cwd,
+  });
+}
+
 export async function runQueueExecution(initialQueue, operations) {
   const completedChildren = [];
   let queue = initialQueue;
   let movedParentToBuilding = false;
+
+  await runBranchCleanupPreflight(queue, operations);
 
   while (true) {
     assertNoConcurrentSupervisor(queue);
@@ -2055,7 +2089,16 @@ export async function runWatchCycle(operations) {
     const routingTarget = getExecutionRoutingTarget(queue, child);
     if (routingTarget) {
       try {
-        resolveIssueWorkingDirectory(routingTarget, operations.routing);
+        const routing = resolveIssueWorkingDirectory(routingTarget, operations.routing);
+        if (typeof operations.assertBranchCleanupPreflight === "function") {
+          await operations.assertBranchCleanupPreflight({
+            parent: queue.parent,
+            child,
+            topLevelChild: child,
+            path: [child],
+            cwd: routing?.cwd,
+          });
+        }
       } catch (error) {
         routingErrors.push({
           issue: queue.parent,
