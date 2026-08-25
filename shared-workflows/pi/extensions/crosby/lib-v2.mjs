@@ -427,6 +427,65 @@ function orderRunnableChildren(runnable) {
   return ordered;
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function getLocalBranchName(branch) {
+  return String(branch?.name ?? branch?.branch ?? branch?.refName ?? "").trim();
+}
+
+function hasConfiguredUpstream(branch) {
+  const upstream = branch?.upstream ?? branch?.upstreamName ?? branch?.tracking;
+  if (typeof upstream === "string") return upstream.trim().length > 0;
+  return upstream !== undefined && upstream !== null;
+}
+
+function getBranchLastCommitDate(branch) {
+  const rawDate =
+    branch?.lastCommitDate ??
+    branch?.committerDate ??
+    branch?.committedDate ??
+    branch?.updatedAt;
+  if (!rawDate) return null;
+
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getBranchAgeDays(branch, now) {
+  const lastCommitDate = getBranchLastCommitDate(branch);
+  if (!lastCommitDate) return null;
+  return Math.max(0, Math.floor((now.getTime() - lastCommitDate.getTime()) / MS_PER_DAY));
+}
+
+function classifyLocalBranch(branch, now) {
+  if (branch?.merged === true || branch?.isMerged === true) {
+    return "Delete local copy";
+  }
+
+  if (!hasConfiguredUpstream(branch)) {
+    return "Needs attention";
+  }
+
+  const ageDays = getBranchAgeDays(branch, now);
+  if (ageDays !== null && ageDays >= 90) return "Very stale review";
+  if (ageDays !== null && ageDays >= 30) return "Stale review";
+
+  return "Keep";
+}
+
+export function classifyLocalBranches(branches, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
+
+  return (Array.isArray(branches) ? branches : [])
+    .filter((branch) => getLocalBranchName(branch) !== "main")
+    .map((branch) => ({
+      ...branch,
+      name: getLocalBranchName(branch),
+      daysSinceLastCommit: getBranchAgeDays(branch, now),
+      recommendation: classifyLocalBranch(branch, now),
+    }));
+}
+
 export function classifyChildIssues(children) {
   const runnable = [];
   const nonRunnable = [];

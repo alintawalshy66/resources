@@ -7,6 +7,7 @@ import {
   buildPiWorkerExtraArgs,
   buildPiWorkerSessionName,
   buildRalphLoopPrompt,
+  classifyLocalBranches,
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
@@ -23,6 +24,71 @@ import {
   runWatchCycle,
   runWatchMode,
 } from "./lib-v2.mjs";
+
+test("classifyLocalBranches excludes main and assigns cleanup recommendations without mutating branch facts", () => {
+  const branchFacts = [
+    {
+      name: "main",
+      merged: false,
+      upstream: "origin/main",
+      lastCommitDate: "2024-01-01T00:00:00.000Z",
+    },
+    {
+      name: "merged-feature",
+      merged: true,
+      upstream: "origin/merged-feature",
+      lastCommitDate: "2024-12-20T00:00:00.000Z",
+    },
+    {
+      name: "missing-upstream",
+      merged: false,
+      upstream: null,
+      lastCommitDate: "2024-12-28T00:00:00.000Z",
+    },
+    {
+      name: "stale-feature",
+      merged: false,
+      upstream: "origin/stale-feature",
+      lastCommitDate: "2024-11-17T00:00:00.000Z",
+    },
+    {
+      name: "very-stale-feature",
+      merged: false,
+      upstream: "origin/very-stale-feature",
+      lastCommitDate: "2024-09-23T00:00:00.000Z",
+    },
+    {
+      name: "active-feature",
+      merged: false,
+      upstream: "origin/active-feature",
+      lastCommitDate: "2024-12-27T00:00:00.000Z",
+    },
+    {
+      name: "missing-upstream-beats-age",
+      merged: false,
+      upstream: "",
+      lastCommitDate: "2024-08-24T00:00:00.000Z",
+    },
+  ];
+  const originalFacts = structuredClone(branchFacts);
+
+  const classified = classifyLocalBranches(branchFacts, {
+    now: new Date("2025-01-01T00:00:00.000Z"),
+  });
+
+  assert.deepEqual(branchFacts, originalFacts);
+  assert.deepEqual(
+    classified.map((branch) => [branch.name, branch.recommendation]),
+    [
+      ["merged-feature", "Delete local copy"],
+      ["missing-upstream", "Needs attention"],
+      ["stale-feature", "Stale review"],
+      ["very-stale-feature", "Very stale review"],
+      ["active-feature", "Keep"],
+      ["missing-upstream-beats-age", "Needs attention"],
+    ],
+  );
+});
 
 test("formatLifecycleStartedEvent and formatLifecycleFinishedEvent normalize worker lifecycle updates into short events", () => {
   assert.equal(formatLifecycleStartedEvent("#135"), "#135 started");
