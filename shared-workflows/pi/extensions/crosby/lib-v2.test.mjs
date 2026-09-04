@@ -8,6 +8,7 @@ import {
   buildPiWorkerSessionName,
   buildRalphLoopPrompt,
   classifyLocalBranches,
+  detectIssueTracker,
   extractEffortOverride,
   extractLabelValue,
   extractModelOverride,
@@ -20,6 +21,8 @@ import {
   renderBranchCleanupAdvisory,
   assertNoLocalBranchCleanupRequired,
   parseIssueTestCommand,
+  selectCrosbyTrackerAdapter,
+  normalizeTrackerIssueReference,
   publishParentPullRequest,
   reviewParentPullRequest,
   runQueueExecution,
@@ -1304,6 +1307,77 @@ test("parseCrosbyCommandArgs supports push and review commands", async () => {
     mode: "review",
     issueKey: "#13",
   });
+});
+
+test("tracker detection routes Jira keys and browse URLs to Jira handling", () => {
+  const jiraAdapter = { name: "jira" };
+  const githubAdapter = { name: "github" };
+
+  assert.deepEqual(parseCrosbyCommandArgs("WCSD-126"), {
+    mode: "parent",
+    issueKey: "WCSD-126",
+  });
+  assert.equal(detectIssueTracker("WCSD-126"), "jira");
+  assert.deepEqual(normalizeTrackerIssueReference("WCSD-126"), {
+    tracker: "jira",
+    issueKey: "WCSD-126",
+  });
+  assert.deepEqual(
+    normalizeTrackerIssueReference(
+      "https://site.atlassian.net/browse/WCSD-126",
+    ),
+    {
+      tracker: "jira",
+      issueKey: "WCSD-126",
+    },
+  );
+  assert.deepEqual(
+    selectCrosbyTrackerAdapter("https://site.atlassian.net/browse/WCSD-126", {
+      github: githubAdapter,
+      jira: jiraAdapter,
+    }),
+    {
+      tracker: "jira",
+      issueKey: "WCSD-126",
+      adapter: jiraAdapter,
+    },
+  );
+});
+
+test("tracker detection preserves GitHub issue references and watch parsing", () => {
+  const githubRefs = [
+    "#123",
+    "123",
+    "https://github.com/alintawalshy66/resources/issues/123",
+  ];
+
+  for (const ref of githubRefs) {
+    assert.equal(detectIssueTracker(ref), "github");
+    assert.equal(
+      selectCrosbyTrackerAdapter(ref, { github: "gh", jira: "jira" }).adapter,
+      "gh",
+    );
+  }
+
+  assert.deepEqual(
+    parseCrosbyCommandArgs(
+      "push https://github.com/alintawalshy66/resources/issues/123",
+    ),
+    {
+      mode: "push",
+      issueKey: "https://github.com/alintawalshy66/resources/issues/123",
+    },
+  );
+  assert.deepEqual(
+    parseCrosbyCommandArgs(
+      "review https://github.com/alintawalshy66/resources/issues/123",
+    ),
+    {
+      mode: "review",
+      issueKey: "https://github.com/alintawalshy66/resources/issues/123",
+    },
+  );
+  assert.deepEqual(parseCrosbyCommandArgs("--watch"), { mode: "watch" });
 });
 
 test("publishParentPullRequest pushes branch and creates PR when missing", async () => {

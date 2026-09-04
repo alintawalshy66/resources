@@ -57,6 +57,55 @@ export function parseCrosbyCommandArgs(args) {
   );
 }
 
+const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
+const JIRA_BROWSE_URL_PATTERN =
+  /^https?:\/\/[^\s/]+\.atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)(?:[/?#].*)?$/i;
+const GITHUB_ISSUE_REF_PATTERN =
+  /^(?:#?\d+|https?:\/\/github\.com\/[^\s/]+\/[^\s/]+\/issues\/\d+(?:[/?#].*)?)$/i;
+
+export function extractJiraIssueKey(issueRef) {
+  const raw = String(issueRef ?? "").trim();
+  if (JIRA_ISSUE_KEY_PATTERN.test(raw)) return raw;
+
+  const browseUrlMatch = raw.match(JIRA_BROWSE_URL_PATTERN);
+  return browseUrlMatch ? browseUrlMatch[1].toUpperCase() : null;
+}
+
+export function detectIssueTracker(issueRef) {
+  if (extractJiraIssueKey(issueRef)) return "jira";
+
+  const raw = String(issueRef ?? "").trim();
+  if (GITHUB_ISSUE_REF_PATTERN.test(raw)) return "github";
+
+  // Crosby historically delegated unknown single references to GitHub's CLI,
+  // so keep that fallback until another tracker explicitly claims the shape.
+  return "github";
+}
+
+export function normalizeTrackerIssueReference(issueRef) {
+  const tracker = detectIssueTracker(issueRef);
+  return {
+    tracker,
+    issueKey:
+      tracker === "jira" ? extractJiraIssueKey(issueRef) : String(issueRef ?? "").trim(),
+  };
+}
+
+export function selectCrosbyTrackerAdapter(issueRef, adapters) {
+  const selection = normalizeTrackerIssueReference(issueRef);
+  const adapter = adapters?.[selection.tracker];
+  if (!adapter) {
+    throw new Error(
+      `No Crosby tracker adapter configured for ${selection.tracker}. Recovery: configure a ${selection.tracker} adapter or use a supported GitHub issue reference.`,
+    );
+  }
+
+  return {
+    ...selection,
+    adapter,
+  };
+}
+
 export function getIssueIdentifier(issueOrKey) {
   if (typeof issueOrKey === "string") return issueOrKey;
   return String(issueOrKey?.identifier ?? issueOrKey?.number ?? "").trim();

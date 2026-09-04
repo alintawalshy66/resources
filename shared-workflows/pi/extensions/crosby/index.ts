@@ -27,6 +27,7 @@ import {
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
+  selectCrosbyTrackerAdapter,
   reviewParentPullRequest,
   runQueueExecution,
   runWatchMode,
@@ -567,6 +568,63 @@ async function addIssueComment(
         : `Failed to add GitHub issue comment to ${issueRef}.`,
     );
   }
+}
+
+type CrosbyTrackerAdapter = {
+  kind: "github" | "jira";
+  fetchParentQueue: (issueRef: string) => Promise<any>;
+  loadIssue: (issueRef: string) => Promise<any>;
+  moveIssue: (issueRef: string, state: string) => Promise<void>;
+  addComment: (issueRef: string, body: string) => Promise<void>;
+};
+
+function createGitHubTrackerAdapter(pi: ExtensionAPI): CrosbyTrackerAdapter {
+  return {
+    kind: "github",
+    fetchParentQueue: (issueRef) =>
+      fetchParentQueue(issueRef, (key) => loadIssueFromGitHub(pi, key)),
+    loadIssue: (issueRef) => loadIssueFromGitHub(pi, issueRef),
+    moveIssue: (issueRef, state) => moveIssue(pi, issueRef, state),
+    addComment: (issueRef, body) => addIssueComment(pi, issueRef, body),
+  };
+}
+
+function buildJiraAdapterBoundaryError(operation: string, issueRef: string) {
+  return new Error(
+    `Crosby selected Jira handling for ${issueRef}, but Jira ${operation} is not implemented in this slice. Recovery: complete the Jira adapter implementation before running Crosby against Jira issues, or use a GitHub issue reference for the existing GitHub flow.`,
+  );
+}
+
+function createJiraTrackerAdapter(): CrosbyTrackerAdapter {
+  return {
+    kind: "jira",
+    fetchParentQueue: async (issueRef) => {
+      throw buildJiraAdapterBoundaryError("queue loading", issueRef);
+    },
+    loadIssue: async (issueRef) => {
+      throw buildJiraAdapterBoundaryError("issue loading", issueRef);
+    },
+    moveIssue: async (issueRef) => {
+      throw buildJiraAdapterBoundaryError("state updates", issueRef);
+    },
+    addComment: async (issueRef) => {
+      throw buildJiraAdapterBoundaryError("comments", issueRef);
+    },
+  };
+}
+
+function selectTrackerAdapter(
+  pi: ExtensionAPI,
+  issueRef: string,
+): {
+  tracker: "github" | "jira";
+  issueKey: string;
+  adapter: CrosbyTrackerAdapter;
+} {
+  return selectCrosbyTrackerAdapter(issueRef, {
+    github: createGitHubTrackerAdapter(pi),
+    jira: createJiraTrackerAdapter(),
+  });
 }
 
 async function getPullRequestForBranch(
@@ -1974,10 +2032,18 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           return;
         }
 
-        const issueKey = command.issueKey;
-        const queue = await fetchParentQueue(issueKey, (key) =>
-          loadIssueFromGitHub(pi, key),
-        );
+        const trackerSelection = selectTrackerAdapter(pi, command.issueKey);
+        const { issueKey, adapter: trackerAdapter } = trackerSelection;
+        if (
+          command.mode !== "parent" &&
+          trackerSelection.tracker !== "github"
+        ) {
+          throw new Error(
+            `Crosby ${command.mode} remains GitHub-only in v1. Recovery: use a GitHub issue reference for ${command.mode}, or run manual Jira execution with /crosby ${issueKey}.`,
+          );
+        }
+
+        const queue = await trackerAdapter.fetchParentQueue(issueKey);
 
         if (command.mode === "push") {
           const pullRequest = await publishParentPullRequest(queue, [], {
@@ -2045,9 +2111,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
 
         const execution = await runQueueExecution(queue, {
           moveIssue: (targetIssueKey, state) =>
-            moveIssue(pi, targetIssueKey, state),
+            trackerAdapter.moveIssue(targetIssueKey, state),
           addComment: (targetIssueKey, body) =>
-            addIssueComment(pi, targetIssueKey, body),
+            trackerAdapter.addComment(targetIssueKey, body),
           runWorker: ({ prompt, cwd, model, effort, childIssueKey }) =>
             runIsolatedWorker(pi, prompt, {
               cwd,
@@ -2071,10 +2137,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           mergeChildBranchIntoParent: ({ parent, child, childBranch, cwd }) =>
             mergeChildBranchIntoParent(pi, parent, child, childBranch, cwd),
           refreshQueue: (parentIssueKey) =>
-            fetchParentQueue(parentIssueKey, (key) =>
-              loadIssueFromGitHub(pi, key),
-            ),
-          loadIssue: (issueKey) => loadIssueFromGitHub(pi, issueKey),
+            trackerAdapter.fetchParentQueue(parentIssueKey),
+          loadIssue: (issueKey) => trackerAdapter.loadIssue(issueKey),
           onExecutionStart: (event) => {
             dashboardController?.executionStarted(event);
             const pathText = formatIssuePath(event.path);
