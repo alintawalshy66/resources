@@ -1,6 +1,6 @@
 # Crosby
 
-Crosby is the GitHub Issues execution orchestrator for this workflow.
+Crosby is the issue execution orchestrator for this workflow. It supports GitHub Issues as the default tracker and Jira issues when Jira credentials are configured.
 
 ## Quick start
 
@@ -143,7 +143,7 @@ What happens:
 3. Picks the next unblocked child with `status:ready-to-build`.
 4. Ensures the repo is on the parent feature branch.
 5. Moves that child to `status:building`.
-6. Runs the Pi worker with a persistent session named from the child issue number (for example `gh-135`) so it is easy to find later with `pi -r` / `/resume`. The worker prompt requires leaf workers to `git add`, `git commit` with a message referencing the issue key, verify `git status --porcelain` is empty before returning `done`, include commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` if they cannot satisfy that commit protocol.
+6. Runs the Pi worker with a persistent tracker-specific session name (`gh-135` for GitHub issues, `jira-WCSD-127` for Jira issues) so it is easy to find later with `pi -r` / `/resume`. GitHub worker prompts tell workers to refresh with `gh issue view`; Jira worker prompts tell workers to refresh with Crosby's read-only Jira view helper and not to mutate Jira labels or statuses directly. The worker prompt requires leaf workers to `git add`, `git commit` with a message referencing the assigned issue key, verify `git status --porcelain` is empty before returning `done`, include commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` if they cannot satisfy that commit protocol.
 7. Validates the worker result against git state:
    - Crosby snapshots `HEAD` on the parent branch before launching the worker
    - `outcome: "done"` closes the child only if a new descendant commit exists on the parent branch after the worker finishes
@@ -167,11 +167,22 @@ Current behavior:
 - ensures the repo is on the parent feature branch
 - moves that child to `status:building`
 - snapshots the current git branch and `HEAD`
-- runs the Pi worker with a persistent `gh-<issue-number>` session name for resume lookup
-- instructs the worker to stage and commit its work, reference the issue key in the commit message, verify `git status --porcelain` is empty before `done`, report commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` when it cannot commit cleanly
+- runs the Pi worker with a persistent tracker-specific session name (`gh-<issue-number>` for GitHub, `jira-<ISSUE-KEY>` for Jira) for resume lookup
+- instructs the worker with tracker-aware refresh guidance: GitHub workers use `gh issue view`, while Jira workers use Crosby's read-only Jira view helper and must not mutate Jira labels or statuses directly
+- instructs the worker to stage and commit its work, reference the assigned issue key in the commit message, verify `git status --porcelain` is empty before `done`, report commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` when it cannot commit cleanly
 - closes `done` children only when worker execution produced a new descendant commit on the parent branch; otherwise moves the child to `status:review` with a clear no-commit diagnostic
 - posts progress back to the parent
 - when all child issues are closed, posts the final summary and moves the parent to `status:review`
+
+## Jira read-only view helper
+
+Jira workers should refresh assigned Jira issue context with Crosby's read-only helper instead of GitHub CLI issue viewing:
+
+```bash
+node shared-workflows/pi/extensions/crosby/jira-view.mjs WCSD-127
+```
+
+The helper loads the Jira issue through the Crosby Jira REST adapter and prints JSON containing the issue key, title, body/description, normalized labels/state, tracker status, parent, and direct children. It performs only read requests; Crosby itself owns Jira label/status changes and comments during queue execution.
 
 ## Branch cleanup preflight report
 
@@ -367,6 +378,7 @@ Defaults:
 - `index.ts` - Pi extension entrypoint and GitHub CLI adapter
 - `lib-v2.mjs` - Crosby queue/execution logic
 - `jira.mjs` - Crosby-owned Jira REST adapter, issue loading, direct children loading, and label normalization
+- `jira-view.mjs` - read-only Jira issue view helper for worker prompt refreshes
 - `lib-v2.test.mjs` - Node test coverage
 - `dashboard.mjs` - dashboard/compact widget state model, event persistence, and rendering
 - `dashboard.test.mjs` - Node test coverage for the dashboard model

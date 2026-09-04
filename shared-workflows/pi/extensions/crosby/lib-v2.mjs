@@ -251,6 +251,9 @@ export function buildPiWorkerExtraArgs({ model, effort } = {}) {
 
 export function buildPiWorkerSessionName(issueKey) {
   const raw = String(issueKey ?? "").trim();
+  const jiraIssueKey = extractJiraIssueKey(raw);
+  if (jiraIssueKey) return `jira-${jiraIssueKey}`;
+
   const issueNumber = raw.match(/\d+/)?.[0];
   if (issueNumber) return `gh-${issueNumber}`;
 
@@ -790,6 +793,37 @@ function buildHumanTestingPromptInstructions() {
   ];
 }
 
+function getWorkerPromptTracker(child) {
+  if (child?.tracker === "jira") return "jira";
+  return detectIssueTracker(child?.identifier);
+}
+
+function buildWorkerRefreshInstructions(child, issueKey) {
+  if (getWorkerPromptTracker(child) === "jira") {
+    const jiraViewCommand = `node shared-workflows/pi/extensions/crosby/jira-view.mjs ${issueKey}`;
+    return [
+      `- The assigned Jira issue key is ${issueKey}.`,
+      `- Use the Crosby-owned read-only Jira view helper instead of GitHub CLI issue viewing: '${jiraViewCommand}'.`,
+      `- First refresh the Jira issue with '${jiraViewCommand}'.`,
+      "- Do not mutate Jira labels or statuses directly; Crosby owns Jira state transitions and comments.",
+    ];
+  }
+
+  return [
+    `- GitHub CLI (gh) is available and authenticated in this environment for ${issueKey}.`,
+    `- Do not claim you cannot access GitHub Issues unless running 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url' actually fails in this worker.`,
+    `- First refresh the issue with 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url'.`,
+  ];
+}
+
+function buildContainerWorkerStateInstruction(child) {
+  if (getWorkerPromptTracker(child) === "jira") {
+    return "- Let Crosby move executable leaf issues through status:building/status:review/status:done; do not change Jira labels or statuses directly.";
+  }
+
+  return "- Move the executable leaf issue through status:building and close it when complete, or move it to status:review if human action is required.";
+}
+
 export function buildRalphLoopPrompt(child) {
   const issueKey = child?.identifier ?? "UNKNOWN-ISSUE";
   const serializedChild = JSON.stringify(child, null, 2);
@@ -801,14 +835,12 @@ export function buildRalphLoopPrompt(child) {
       `Continue Crosby execution for container issue ${issueKey}.`,
       "",
       "Execution notes:",
-      `- GitHub CLI (gh) is available and authenticated in this environment for ${issueKey}.`,
-      `- Do not claim you cannot access GitHub Issues unless running 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url' actually fails in this worker.`,
-      `- First refresh the issue with 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url'.`,
+      ...buildWorkerRefreshInstructions(child, issueKey),
       "- Crosby may already have moved this container issue to status:building before launching this worker; that state is valid and means this is an explicit resume/continuation, not a fresh ralph-loop start.",
       "- This issue has child issues, so treat it as a container/parent queue instead of invoking the ralph-loop hard guard on the container itself.",
       "- Execute the next unblocked child issue under this container that is in status:ready-to-build, using the same TDD discipline as ralph-loop for that leaf issue.",
       "- If a nested child also has children, descend to its next unblocked status:ready-to-build child until you reach an executable leaf issue.",
-      "- Move the executable leaf issue through status:building and close it when complete, or move it to status:review if human action is required.",
+      buildContainerWorkerStateInstruction(child),
       `- When all direct children of ${issueKey} are closed, return outcome done for ${issueKey}. If runnable children remain, continue within this worker until the ${issueKey} child queue is exhausted or human action is required.`,
       ...buildWorkerCommitProtocol("the executable leaf issue key"),
       ...buildHumanTestingPromptInstructions(),
@@ -826,9 +858,7 @@ export function buildRalphLoopPrompt(child) {
     `Continue Crosby execution for issue ${issueKey}.`,
     "",
     "Execution notes:",
-    `- GitHub CLI (gh) is available and authenticated in this environment for ${issueKey}.`,
-    `- Do not claim you cannot access GitHub Issues unless running 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url' actually fails in this worker.`,
-    `- First refresh the issue with 'gh issue view ${issueKey} --json number,title,body,state,labels,milestone,url'.`,
+    ...buildWorkerRefreshInstructions(child, issueKey),
     "- The parent queue snapshot may be shallow and omit this issue's children, so do not assume this is a leaf issue from the preloaded snapshot alone.",
     "- If the refreshed issue has child issues, treat it as a container/parent queue: status:building is a valid resume state, find its next unblocked status:ready-to-build child, and continue through its child queue until exhausted or human action is required.",
     "- Only if the refreshed issue has no children, execute it as a leaf issue using ralph-loop/TDD discipline.",

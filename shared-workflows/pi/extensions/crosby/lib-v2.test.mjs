@@ -307,13 +307,14 @@ test("formatLifecycleStartedEvent and formatLifecycleFinishedEvent normalize wor
   assert.equal(formatLifecycleFinishedEvent("#137", "fatal"), "#137 fatal");
 });
 
-test("buildPiWorkerSessionName names Pi sessions from GitHub issue numbers", () => {
+test("buildPiWorkerSessionName names Pi sessions from tracker-specific issue keys", () => {
   assert.equal(buildPiWorkerSessionName("#123"), "gh-123");
   assert.equal(buildPiWorkerSessionName(456), "gh-456");
   assert.equal(
     buildPiWorkerSessionName("https://github.com/example/repo/issues/789"),
     "gh-789",
   );
+  assert.equal(buildPiWorkerSessionName("WCSD-127"), "jira-WCSD-127");
   assert.equal(buildPiWorkerSessionName("manual worker"), "crosby-manual-worker");
   assert.equal(buildPiWorkerSessionName(null), "crosby-worker");
 });
@@ -428,6 +429,8 @@ test("buildRalphLoopPrompt requires commit postconditions before done results", 
     body: "## Acceptance Criteria",
   });
 
+  assert.match(prompt, /GitHub CLI \(gh\) is available/i);
+  assert.match(prompt, /gh issue view #24 --json number,title,body,state,labels,milestone,url/i);
   assert.match(prompt, /git add/i);
   assert.match(prompt, /git commit/i);
   assert.match(prompt, /commit message must reference #24/i);
@@ -439,6 +442,23 @@ test("buildRalphLoopPrompt requires commit postconditions before done results", 
   assert.match(prompt, /requiredHumanAction/i);
   assert.match(prompt, /humanTestingRequired/i);
   assert.match(prompt, /humanTestingInstructions/i);
+});
+
+test("buildRalphLoopPrompt uses Jira-specific read-only refresh instructions and commit key", () => {
+  const prompt = buildRalphLoopPrompt({
+    identifier: "WCSD-127",
+    tracker: "jira",
+    title: "Add tracker-aware worker prompts",
+    body: "## Acceptance Criteria",
+  });
+
+  assert.match(prompt, /Continue Crosby execution for issue WCSD-127\./);
+  assert.match(prompt, /Crosby-owned read-only Jira view helper/i);
+  assert.match(prompt, /node shared-workflows\/pi\/extensions\/crosby\/jira-view\.mjs WCSD-127/);
+  assert.match(prompt, /Do not mutate Jira labels or statuses directly/i);
+  assert.match(prompt, /commit message must reference WCSD-127/i);
+  assert.doesNotMatch(prompt, /gh issue view/i);
+  assert.doesNotMatch(prompt, /GitHub CLI \(gh\) is available/i);
 });
 
 test("buildParentProgressComment includes human testing handoff", () => {
