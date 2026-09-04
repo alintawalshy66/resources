@@ -27,7 +27,6 @@ import {
   mergeChecklistAndNativeIssueChildren,
   parseCrosbyCommandArgs,
   publishParentPullRequest,
-  selectCrosbyTrackerAdapter,
   reviewParentPullRequest,
   runQueueExecution,
   runWatchMode,
@@ -613,6 +612,18 @@ function createJiraTrackerAdapter(): CrosbyTrackerAdapter {
   };
 }
 
+const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
+const JIRA_BROWSE_URL_PATTERN =
+  /^https?:\/\/[^\s/]+\.atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)(?:[/?#].*)?$/i;
+
+function extractJiraIssueKey(issueRef: string) {
+  const raw = String(issueRef ?? "").trim();
+  if (JIRA_ISSUE_KEY_PATTERN.test(raw)) return raw;
+
+  const browseUrlMatch = raw.match(JIRA_BROWSE_URL_PATTERN);
+  return browseUrlMatch ? browseUrlMatch[1].toUpperCase() : null;
+}
+
 function selectTrackerAdapter(
   pi: ExtensionAPI,
   issueRef: string,
@@ -621,10 +632,17 @@ function selectTrackerAdapter(
   issueKey: string;
   adapter: CrosbyTrackerAdapter;
 } {
-  return selectCrosbyTrackerAdapter(issueRef, {
-    github: createGitHubTrackerAdapter(pi),
-    jira: createJiraTrackerAdapter(),
-  });
+  const jiraIssueKey = extractJiraIssueKey(issueRef);
+  const tracker = jiraIssueKey ? "jira" : "github";
+
+  return {
+    tracker,
+    issueKey: jiraIssueKey ?? String(issueRef ?? "").trim(),
+    adapter:
+      tracker === "jira"
+        ? createJiraTrackerAdapter()
+        : createGitHubTrackerAdapter(pi),
+  };
 }
 
 async function getPullRequestForBranch(
@@ -897,6 +915,31 @@ async function loadLocalBranchCleanupFacts(
   );
 }
 
+function getParentIssueNumber(parent: any) {
+  const raw = String(parent?.identifier ?? parent?.number ?? "").trim();
+  const match = raw.match(/\d+/);
+  return match ? match[0] : null;
+}
+
+function isAllowedCrosbyRunBranch(branch: any, parent: any) {
+  const branchName = String(branch?.name ?? "").trim();
+  const parentBranchName = String(parent?.branchName ?? "").trim();
+
+  if (branchName === "main") return true;
+  if (parentBranchName && branchName === parentBranchName) return true;
+
+  const parentNumber = getParentIssueNumber(parent);
+  if (
+    parentNumber &&
+    branch?.merged === true &&
+    branchName.startsWith(`crosby/${parentNumber}/`)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 async function assertBranchCleanupPreflight(
   pi: ExtensionAPI,
   cwd: string | undefined,
@@ -911,10 +954,10 @@ async function assertBranchCleanupPreflight(
   const parentBranchName = String(context.parent?.branchName ?? "").trim();
   const baseBranch = parentBranchName || "main";
   const branches = await loadLocalBranchCleanupFacts(pi, cwd, baseBranch);
-  assertNoLocalBranchCleanupRequired(branches, {
-    baseBranch,
-    parentIssue: context.parent,
-  });
+  const blockingBranches = branches.filter(
+    (branch) => !isAllowedCrosbyRunBranch(branch, context.parent),
+  );
+  assertNoLocalBranchCleanupRequired(blockingBranches, { baseBranch });
 }
 
 async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
