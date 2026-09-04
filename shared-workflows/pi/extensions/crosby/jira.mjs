@@ -25,9 +25,15 @@ const JIRA_EFFORT_LABELS = new Map([
   ["effort-xhigh", "effort:xhigh"],
   ["effort-max", "effort:max"],
 ]);
+const JIRA_WORK_TYPE_LABELS = new Map([
+  ["wt-development", "wt:development"],
+  ["wt-process-automation", "wt:process-automation"],
+]);
 const JIRA_MODEL_LABELS = new Map([
   ["model-github-copilot-gpt-5.5", "model:github-copilot/gpt-5.5"],
+  ["model-github-copilot-gpt-5-5", "model:github-copilot/gpt-5.5"],
   ["model-github-copilot-claude-opus-4.7", "model:github-copilot/claude-opus-4.7"],
+  ["model-github-copilot-claude-opus-4-7", "model:github-copilot/claude-opus-4.7"],
   ["model-github-copilot-claude-sonnet-4.5", "model:github-copilot/claude-sonnet-4.5"],
   ["model-github-copilot-claude-sonnet-4.7", "model:github-copilot/claude-sonnet-4.7"],
 ]);
@@ -137,6 +143,7 @@ export function normalizeJiraLabels(labels) {
         JIRA_STATUS_LABELS.get(normalized) ??
         JIRA_MODE_LABELS.get(normalized) ??
         JIRA_EFFORT_LABELS.get(normalized) ??
+        JIRA_WORK_TYPE_LABELS.get(normalized) ??
         JIRA_MODEL_LABELS.get(normalized) ??
         label
       );

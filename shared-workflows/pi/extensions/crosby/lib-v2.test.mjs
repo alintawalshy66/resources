@@ -1488,7 +1488,9 @@ test("normalizeJiraLabels converts known Jira-safe labels and preserves unknown 
       "mode-afk",
       "mode-hitl",
       "effort-medium",
+      "wt-development",
       "model-github-copilot-gpt-5.5",
+      "model-github-copilot-claude-opus-4-7",
       "pi-resources",
     ]),
     [
@@ -1499,7 +1501,9 @@ test("normalizeJiraLabels converts known Jira-safe labels and preserves unknown 
       "mode:afk",
       "mode:hitl",
       "effort:medium",
+      "wt:development",
       "model:github-copilot/gpt-5.5",
+      "model:github-copilot/claude-opus-4.7",
       "pi-resources",
     ],
   );
