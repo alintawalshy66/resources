@@ -348,6 +348,7 @@ Optional environment variables:
 - `CROSBY_HERDR_PANES=0` disables automatic Herdr worker terminals when Crosby is running inside Herdr
 - `CROSBY_HERDR_LAYOUT=tab|pane` chooses worker display layout when running inside Herdr; default is `tab`
 - `CROSBY_DASHBOARD_PANE=0` disables the automatic Herdr dashboard pane; the dashboard pane is otherwise opened by default whenever Crosby is running inside Herdr, and never opened outside Herdr
+- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_VERIFY_SSL`, and `JIRA_CA_BUNDLE` configure the Jira REST adapter; values may also be read from `/home/walsc0/projects/dlhub/backend/.env` when missing from the environment
 - `GH_BIN`
 - `GIT_BIN`
 - `CLAUDE_BIN`
@@ -365,6 +366,7 @@ Defaults:
 
 - `index.ts` - Pi extension entrypoint and GitHub CLI adapter
 - `lib-v2.mjs` - Crosby queue/execution logic
+- `jira.mjs` - Crosby-owned Jira REST adapter, issue loading, direct children loading, and label normalization
 - `lib-v2.test.mjs` - Node test coverage
 - `dashboard.mjs` - dashboard/compact widget state model, event persistence, and rendering
 - `dashboard.test.mjs` - Node test coverage for the dashboard model

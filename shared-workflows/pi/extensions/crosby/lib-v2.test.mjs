@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  createJiraTrackerAdapter,
+  loadJiraConfig,
+  normalizeJiraLabels,
+} from "./jira.mjs";
+import {
   buildFinalParentSummary,
   buildFinalTriggerTestingSummary,
   buildParentProgressComment,
@@ -1451,6 +1456,124 @@ test("tracker detection preserves GitHub issue references and watch parsing", ()
     },
   );
   assert.deepEqual(parseCrosbyCommandArgs("--watch"), { mode: "watch" });
+});
+
+test("normalizeJiraLabels converts known Jira-safe labels and preserves unknown labels", () => {
+  assert.deepEqual(
+    normalizeJiraLabels([
+      "status-ready-to-build",
+      "status-building",
+      "status-review",
+      "status-done",
+      "mode-afk",
+      "mode-hitl",
+      "effort-medium",
+      "model-github-copilot-gpt-5.5",
+      "pi-resources",
+    ]),
+    [
+      "status:ready-to-build",
+      "status:building",
+      "status:review",
+      "status:done",
+      "mode:afk",
+      "mode:hitl",
+      "effort:medium",
+      "model:github-copilot/gpt-5.5",
+      "pi-resources",
+    ],
+  );
+});
+
+test("loadJiraConfig reads credentials from env before optional dotenv fallback", () => {
+  const config = loadJiraConfig({
+    env: {
+      JIRA_BASE_URL: "https://env.atlassian.net/",
+      JIRA_EMAIL: "env@example.com",
+      JIRA_API_TOKEN: "env-token",
+      JIRA_VERIFY_SSL: "false",
+      JIRA_CA_BUNDLE: "/tmp/env-ca.pem",
+    },
+    readFallbackEnv: () =>
+      "JIRA_BASE_URL=https://fallback.atlassian.net\nJIRA_EMAIL=fallback@example.com\nJIRA_API_TOKEN=fallback-token\nJIRA_VERIFY_SSL=true\n",
+  });
+
+  assert.deepEqual(config, {
+    baseUrl: "https://env.atlassian.net",
+    email: "env@example.com",
+    apiToken: "env-token",
+    verifySsl: false,
+    caBundle: "/tmp/env-ca.pem",
+  });
+});
+
+test("Jira adapter loads a root issue and direct children into Crosby issue shape", async () => {
+  const requested = [];
+  const adapter = createJiraTrackerAdapter({
+    requestJson: async (request) => {
+      requested.push(request);
+      if (request.path.startsWith("/rest/api/3/issue/WCSD-126")) {
+        return {
+          key: "WCSD-126",
+          self: "https://example.atlassian.net/rest/api/3/issue/10001",
+          fields: {
+            summary: "Parent issue",
+            description: "Parent body",
+            status: { name: "In Progress" },
+            labels: ["status-building", "mode-afk", "pi-resources"],
+          },
+        };
+      }
+
+      assert.equal(request.path, "/rest/api/3/search");
+      assert.equal(request.method, "POST");
+      assert.equal(request.body.jql, "parent = WCSD-126 ORDER BY key ASC");
+      return {
+        issues: [
+          {
+            key: "WCSD-127",
+            self: "https://example.atlassian.net/rest/api/3/issue/10002",
+            fields: {
+              summary: "Child issue",
+              description: "Child body",
+              status: { name: "To Do" },
+              labels: ["status-ready-to-build", "effort-medium", "custom-routing"],
+            },
+          },
+        ],
+      };
+    },
+  });
+
+  const queue = await adapter.fetchParentQueue("WCSD-126");
+
+  assert.equal(requested.length, 2);
+  assert.equal(queue.parent.identifier, "WCSD-126");
+  assert.equal(queue.parent.title, "Parent issue");
+  assert.equal(queue.parent.trackerStatus, "In Progress");
+  assert.equal(queue.parent.state.name, "Building");
+  assert.deepEqual(
+    queue.parent.labels.nodes.map((label) => label.name),
+    ["status:building", "mode:afk", "pi-resources"],
+  );
+  assert.deepEqual(
+    queue.children.map((child) => ({
+      identifier: child.identifier,
+      title: child.title,
+      trackerStatus: child.trackerStatus,
+      state: child.state,
+      labels: child.labels.nodes.map((label) => label.name),
+    })),
+    [
+      {
+        identifier: "WCSD-127",
+        title: "Child issue",
+        trackerStatus: "To Do",
+        state: { name: "Ready to Build", type: "unstarted" },
+        labels: ["status:ready-to-build", "effort:medium", "custom-routing"],
+      },
+    ],
+  );
 });
 
 test("publishParentPullRequest pushes branch and creates PR when missing", async () => {

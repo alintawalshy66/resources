@@ -4,6 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createJiraTrackerAdapter } from "./jira.mjs";
 import {
   createCrosbyDashboard,
   markDashboardExecutionFinalized,
@@ -585,30 +586,6 @@ function createGitHubTrackerAdapter(pi: ExtensionAPI): CrosbyTrackerAdapter {
     loadIssue: (issueRef) => loadIssueFromGitHub(pi, issueRef),
     moveIssue: (issueRef, state) => moveIssue(pi, issueRef, state),
     addComment: (issueRef, body) => addIssueComment(pi, issueRef, body),
-  };
-}
-
-function buildJiraAdapterBoundaryError(operation: string, issueRef: string) {
-  return new Error(
-    `Crosby selected Jira handling for ${issueRef}, but Jira ${operation} is not implemented in this slice. Recovery: complete the Jira adapter implementation before running Crosby against Jira issues, or use a GitHub issue reference for the existing GitHub flow.`,
-  );
-}
-
-function createJiraTrackerAdapter(): CrosbyTrackerAdapter {
-  return {
-    kind: "jira",
-    fetchParentQueue: async (issueRef) => {
-      throw buildJiraAdapterBoundaryError("queue loading", issueRef);
-    },
-    loadIssue: async (issueRef) => {
-      throw buildJiraAdapterBoundaryError("issue loading", issueRef);
-    },
-    moveIssue: async (issueRef) => {
-      throw buildJiraAdapterBoundaryError("state updates", issueRef);
-    },
-    addComment: async (issueRef) => {
-      throw buildJiraAdapterBoundaryError("comments", issueRef);
-    },
   };
 }
 
