@@ -482,6 +482,42 @@ function getLocalBranchName(branch) {
   return String(branch?.name ?? branch?.branch ?? branch?.refName ?? "").trim();
 }
 
+function getCleanupParentBranchName(options = {}) {
+  return String(
+    options.parentBranchName ??
+      options.parentIssue?.branchName ??
+      options.parent?.branchName ??
+      "",
+  ).trim();
+}
+
+function getCleanupParentIssueNumber(options = {}) {
+  const parentIssue = options.parentIssue ?? options.parent;
+  const raw = String(parentIssue?.identifier ?? parentIssue?.number ?? "").trim();
+  const match = raw.match(/\d+/);
+  return match ? match[0] : null;
+}
+
+function isMergedCrosbyChildBranchForParent(branch, options = {}) {
+  if (branch?.merged !== true && branch?.isMerged !== true) return false;
+
+  const parentNumber = getCleanupParentIssueNumber(options);
+  if (!parentNumber) return false;
+
+  return getLocalBranchName(branch).startsWith(`crosby/${parentNumber}/`);
+}
+
+function isAllowedBranchForCrosbyRun(branch, options = {}) {
+  const branchName = getLocalBranchName(branch);
+  const parentBranchName = getCleanupParentBranchName(options);
+
+  if (branchName === "main") return true;
+  if (parentBranchName && branchName === parentBranchName) return true;
+  if (isMergedCrosbyChildBranchForParent(branch, options)) return true;
+
+  return false;
+}
+
 function hasConfiguredUpstream(branch) {
   const upstream = branch?.upstream ?? branch?.upstreamName ?? branch?.tracking;
   if (typeof upstream === "string") return upstream.trim().length > 0;
@@ -526,7 +562,7 @@ export function classifyLocalBranches(branches, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
 
   return (Array.isArray(branches) ? branches : [])
-    .filter((branch) => getLocalBranchName(branch) !== "main")
+    .filter((branch) => !isAllowedBranchForCrosbyRun(branch, options))
     .map((branch) => ({
       ...branch,
       name: getLocalBranchName(branch),

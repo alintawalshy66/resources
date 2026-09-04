@@ -204,6 +204,79 @@ test("assertNoLocalBranchCleanupRequired blocks with the cleanup advisory for no
   );
 });
 
+test("assertNoLocalBranchCleanupRequired allows active parent and merged child branches for the same Crosby run", () => {
+  assert.doesNotThrow(() =>
+    assertNoLocalBranchCleanupRequired(
+      [
+        {
+          name: "main",
+          current: false,
+          merged: true,
+          upstream: "origin/main",
+          lastCommitDate: "2024-12-30T00:00:00.000Z",
+        },
+        {
+          name: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+          current: true,
+          merged: true,
+          upstream: "",
+          ahead: 1,
+          lastCommitDate: "2024-12-31T00:00:00.000Z",
+        },
+        {
+          name: "crosby/56/57-add-tracker-detection-and-adapter-boundary-for-c",
+          current: false,
+          merged: true,
+          upstream: "",
+          lastCommitDate: "2024-12-31T00:00:00.000Z",
+        },
+      ],
+      {
+        now: new Date("2025-01-01T00:00:00.000Z"),
+        baseBranch: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+        parentIssue: {
+          identifier: "#56",
+          branchName: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+        },
+      },
+    ),
+  );
+});
+
+test("assertNoLocalBranchCleanupRequired still blocks unrelated non-parent branches during a Crosby run", () => {
+  assert.throws(
+    () =>
+      assertNoLocalBranchCleanupRequired(
+        [
+          {
+            name: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+            current: true,
+            merged: true,
+            upstream: "",
+            ahead: 1,
+            lastCommitDate: "2024-12-31T00:00:00.000Z",
+          },
+          {
+            name: "crosby/55/99-old-child",
+            current: false,
+            merged: false,
+            upstream: "",
+            lastCommitDate: "2024-12-31T00:00:00.000Z",
+          },
+        ],
+        {
+          now: new Date("2025-01-01T00:00:00.000Z"),
+          baseBranch: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+          parentIssue: {
+            identifier: "#56",
+            branchName: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+          },
+        },
+      ),
+    /crosby\/55\/99-old-child/,
+  );
+});
+
 test("assertNoLocalBranchCleanupRequired passes when only local main is present", () => {
   assert.doesNotThrow(() =>
     assertNoLocalBranchCleanupRequired([

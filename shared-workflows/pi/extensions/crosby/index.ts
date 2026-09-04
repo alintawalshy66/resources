@@ -900,6 +900,7 @@ async function loadLocalBranchCleanupFacts(
 async function assertBranchCleanupPreflight(
   pi: ExtensionAPI,
   cwd: string | undefined,
+  context: { parent?: any } = {},
 ) {
   if (!cwd) {
     throw new Error(
@@ -907,8 +908,13 @@ async function assertBranchCleanupPreflight(
     );
   }
 
-  const branches = await loadLocalBranchCleanupFacts(pi, cwd, "main");
-  assertNoLocalBranchCleanupRequired(branches, { baseBranch: "main" });
+  const parentBranchName = String(context.parent?.branchName ?? "").trim();
+  const baseBranch = parentBranchName || "main";
+  const branches = await loadLocalBranchCleanupFacts(pi, cwd, baseBranch);
+  assertNoLocalBranchCleanupRequired(branches, {
+    baseBranch,
+    parentIssue: context.parent,
+  });
 }
 
 async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
@@ -1918,8 +1924,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
-              assertBranchCleanupPreflight: ({ cwd }) =>
-                assertBranchCleanupPreflight(pi, cwd),
+              assertBranchCleanupPreflight: ({ parent, cwd }) =>
+                assertBranchCleanupPreflight(pi, cwd, { parent }),
               prepareChildBranch: ({ parent, child, cwd }) =>
                 prepareChildBranch(pi, parent, child, cwd),
               snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
@@ -2125,8 +2131,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
-          assertBranchCleanupPreflight: ({ cwd }) =>
-            assertBranchCleanupPreflight(pi, cwd),
+          assertBranchCleanupPreflight: ({ parent, cwd }) =>
+            assertBranchCleanupPreflight(pi, cwd, { parent }),
           prepareChildBranch: ({ parent, child, cwd }) =>
             prepareChildBranch(pi, parent, child, cwd),
           snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
