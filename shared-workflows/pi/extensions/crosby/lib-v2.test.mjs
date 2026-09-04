@@ -1545,7 +1545,7 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
         };
       }
 
-      assert.equal(request.path, "/rest/api/3/search");
+      assert.equal(request.path, "/rest/api/3/search/jql");
       assert.equal(request.method, "POST");
       assert.equal(request.body.jql, "parent = WCSD-126 ORDER BY key ASC");
       return {

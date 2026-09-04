@@ -329,7 +329,7 @@ export function createJiraTrackerAdapter(options = {}) {
   async function loadDirectChildren(issueKey) {
     const searchResult = await requestJson({
       method: "POST",
-      path: "/rest/api/3/search",
+      path: "/rest/api/3/search/jql",
       body: {
         jql: `parent = ${issueKey} ORDER BY key ASC`,
         fields: ["summary", "description", "status", "labels", "parent"],
