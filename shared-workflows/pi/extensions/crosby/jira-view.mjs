@@ -27,6 +27,7 @@ async function main(argv = process.argv.slice(2)) {
     url: issue.url,
     tracker: issue.tracker,
     trackerStatus: issue.trackerStatus,
+    branchName: issue.branchName,
     parent: issue.parent,
     children: issue.children,
   };

@@ -171,6 +171,18 @@ function getStateFromLabels(labels) {
   }
 }
 
+function deriveBranchNameFromJiraIssue(description, labels) {
+  const bodyMatch = String(description ?? "").match(/(?:^|\n)\s*Branch:\s*([^\n]+)\s*/i);
+  if (bodyMatch?.[1]?.trim()) return bodyMatch[1].trim();
+
+  const branchLabel = (Array.isArray(labels) ? labels : []).find((label) =>
+    /^branch:/i.test(String(label ?? "").trim()),
+  );
+  if (branchLabel) return String(branchLabel).replace(/^branch:/i, "").trim();
+
+  return undefined;
+}
+
 function adfToPlainText(node) {
   if (node === null || node === undefined) return "";
   if (typeof node === "string") return node;
@@ -201,6 +213,7 @@ function toCrosbyJiraIssue(jiraIssue, children = []) {
     url: jiraIssue?.browseUrl,
     tracker: "jira",
     trackerStatus,
+    branchName: deriveBranchNameFromJiraIssue(description, rawLabels),
     state: getStateFromLabels(rawLabels),
     labels: { nodes: labels },
     parent: fields.parent?.key ? { identifier: fields.parent.key } : undefined,

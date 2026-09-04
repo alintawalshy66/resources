@@ -1542,7 +1542,7 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
           self: "https://example.atlassian.net/rest/api/3/issue/10001",
           fields: {
             summary: "Parent issue",
-            description: "Parent body",
+            description: "Parent body\nBranch: issue-126-parent-issue",
             status: { name: "In Progress" },
             labels: ["status-building", "mode-afk", "pi-resources"],
           },
@@ -1575,6 +1575,7 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
   assert.equal(queue.parent.identifier, "WCSD-126");
   assert.equal(queue.parent.title, "Parent issue");
   assert.equal(queue.parent.trackerStatus, "In Progress");
+  assert.equal(queue.parent.branchName, "issue-126-parent-issue");
   assert.equal(queue.parent.state.name, "Building");
   assert.deepEqual(
     queue.parent.labels.nodes.map((label) => label.name),
