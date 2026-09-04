@@ -31,6 +31,16 @@ const JIRA_MODEL_LABELS = new Map([
   ["model-github-copilot-claude-sonnet-4.5", "model:github-copilot/claude-sonnet-4.5"],
   ["model-github-copilot-claude-sonnet-4.7", "model:github-copilot/claude-sonnet-4.7"],
 ]);
+const JIRA_SAFE_STATUS_LABEL_BY_STATE = new Map([
+  ["ready", "status-ready"],
+  ["execute", "status-execute"],
+  ["ready to build", "status-ready-to-build"],
+  ["building", "status-building"],
+  ["build", "status-building"],
+  ["review", "status-review"],
+  ["in review", "status-review"],
+  ["done", "status-done"],
+]);
 
 function parseDotenvValue(rawValue) {
   let value = String(rawValue ?? "").trim();
@@ -240,8 +250,68 @@ async function defaultRequestJson(config, request) {
   });
 }
 
+function encodeIssueBasePath(issueKey) {
+  return `/rest/api/3/issue/${encodeURIComponent(issueKey)}`;
+}
+
 function encodeIssuePath(issueKey) {
-  return `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,description,status,labels,parent`;
+  return `${encodeIssueBasePath(issueKey)}?fields=summary,description,status,labels,parent`;
+}
+
+function attachBrowseUrl(issue, config) {
+  const issueKey = issue?.key ? getIssueKey(issue.key) : null;
+  if (issueKey && !issue.browseUrl && config?.baseUrl) {
+    issue.browseUrl = `${config.baseUrl}/browse/${issueKey}`;
+  }
+  return issue;
+}
+
+function getSafeStatusLabelForState(state) {
+  const normalized = String(state ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  return JIRA_SAFE_STATUS_LABEL_BY_STATE.get(normalized) ?? null;
+}
+
+function isJiraStatusLabel(label) {
+  return normalizeJiraLabels([label])[0]?.startsWith("status:") === true;
+}
+
+function labelsForState(currentLabels, state) {
+  const targetLabel = getSafeStatusLabelForState(state);
+  if (!targetLabel) return null;
+
+  const nextLabels = [];
+  const seen = new Set();
+  for (const label of Array.isArray(currentLabels) ? currentLabels : []) {
+    const trimmed = String(label ?? "").trim();
+    if (!trimmed || isJiraStatusLabel(trimmed) || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    nextLabels.push(trimmed);
+  }
+
+  if (!seen.has(targetLabel)) {
+    nextLabels.push(targetLabel);
+  }
+
+  return nextLabels;
+}
+
+function plainTextToAdf(text) {
+  const paragraphs = String(text ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => ({
+      type: "paragraph",
+      content: [{ type: "text", text: line }],
+    }));
+
+  return {
+    type: "doc",
+    version: 1,
+    content: paragraphs.length > 0 ? paragraphs : [{ type: "paragraph", content: [] }],
+  };
 }
 
 export function createJiraTrackerAdapter(options = {}) {
@@ -251,21 +321,12 @@ export function createJiraTrackerAdapter(options = {}) {
       ? options.requestJson
       : (request) => defaultRequestJson(config, request);
 
-  async function loadIssue(issueRef) {
-    const issueKey = getIssueKey(issueRef);
+  async function loadRawIssue(issueKey) {
     const issue = await requestJson({ method: "GET", path: encodeIssuePath(issueKey) });
-    if (!issue?.browseUrl && config?.baseUrl) {
-      issue.browseUrl = `${config.baseUrl}/browse/${issueKey}`;
-    }
-    return toCrosbyJiraIssue(issue, []);
+    return attachBrowseUrl(issue, config);
   }
 
-  async function fetchParentQueue(issueRef) {
-    const issueKey = getIssueKey(issueRef);
-    const root = await requestJson({ method: "GET", path: encodeIssuePath(issueKey) });
-    if (!root?.browseUrl && config?.baseUrl) {
-      root.browseUrl = `${config.baseUrl}/browse/${issueKey}`;
-    }
+  async function loadDirectChildren(issueKey) {
     const searchResult = await requestJson({
       method: "POST",
       path: "/rest/api/3/search",
@@ -275,12 +336,27 @@ export function createJiraTrackerAdapter(options = {}) {
         maxResults: 100,
       },
     });
-    const children = (Array.isArray(searchResult?.issues) ? searchResult.issues : []).map((child) => {
-      if (!child?.browseUrl && config?.baseUrl && child?.key) {
-        child.browseUrl = `${config.baseUrl}/browse/${child.key}`;
-      }
-      return toCrosbyJiraIssue(child, []);
-    });
+
+    return (Array.isArray(searchResult?.issues) ? searchResult.issues : []).map((child) =>
+      toCrosbyJiraIssue(attachBrowseUrl(child, config), []),
+    );
+  }
+
+  async function loadIssue(issueRef) {
+    const issueKey = getIssueKey(issueRef);
+    const [issue, children] = await Promise.all([
+      loadRawIssue(issueKey),
+      loadDirectChildren(issueKey),
+    ]);
+    return toCrosbyJiraIssue(issue, children);
+  }
+
+  async function fetchParentQueue(issueRef) {
+    const issueKey = getIssueKey(issueRef);
+    const [root, children] = await Promise.all([
+      loadRawIssue(issueKey),
+      loadDirectChildren(issueKey),
+    ]);
 
     return {
       parent: toCrosbyJiraIssue(root, children),
@@ -288,15 +364,39 @@ export function createJiraTrackerAdapter(options = {}) {
     };
   }
 
+  async function moveIssue(issueRef, state) {
+    const issueKey = getIssueKey(issueRef);
+    const issue = await loadRawIssue(issueKey);
+    const nextLabels = labelsForState(issue?.fields?.labels, state);
+    if (!nextLabels) return;
+
+    await requestJson({
+      method: "PUT",
+      path: encodeIssueBasePath(issueKey),
+      body: {
+        fields: {
+          labels: nextLabels,
+        },
+      },
+    });
+  }
+
+  async function addComment(issueRef, body) {
+    const issueKey = getIssueKey(issueRef);
+    await requestJson({
+      method: "POST",
+      path: `${encodeIssueBasePath(issueKey)}/comment`,
+      body: {
+        body: plainTextToAdf(body),
+      },
+    });
+  }
+
   return {
     kind: "jira",
     fetchParentQueue,
     loadIssue,
-    moveIssue: async () => {
-      throw new Error("Crosby Jira state updates are not implemented yet. Recovery: update Jira status/labels manually or complete the Jira mutating adapter slice.");
-    },
-    addComment: async () => {
-      throw new Error("Crosby Jira comments are not implemented yet. Recovery: add the Jira comment manually or complete the Jira mutating adapter slice.");
-    },
+    moveIssue,
+    addComment,
   };
 }

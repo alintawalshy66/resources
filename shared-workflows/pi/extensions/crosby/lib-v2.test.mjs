@@ -1576,6 +1576,213 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
   );
 });
 
+test("Jira adapter mutates only labels when moving issues", async () => {
+  const requests = [];
+  const adapter = createJiraTrackerAdapter({
+    requestJson: async (request) => {
+      requests.push(request);
+      if (request.method === "GET") {
+        return {
+          key: "WCSD-127",
+          fields: {
+            summary: "Child issue",
+            status: { name: "To Do" },
+            labels: ["status-ready-to-build", "mode-afk", "custom-routing"],
+          },
+        };
+      }
+      return null;
+    },
+  });
+
+  await adapter.moveIssue("WCSD-127", "Building");
+
+  assert.deepEqual(
+    requests.map((request) => [request.method, request.path]),
+    [
+      ["GET", "/rest/api/3/issue/WCSD-127?fields=summary,description,status,labels,parent"],
+      ["PUT", "/rest/api/3/issue/WCSD-127"],
+    ],
+  );
+  assert.deepEqual(requests[1].body, {
+    fields: {
+      labels: ["mode-afk", "custom-routing", "status-building"],
+    },
+  });
+  assert.equal(
+    requests.some((request) => /transitions/i.test(request.path)),
+    false,
+  );
+});
+
+test("Jira adapter maps Crosby review and done states to Jira-safe labels", async () => {
+  const updates = [];
+  const labelsByIssue = new Map([
+    ["WCSD-127", ["status-building", "mode-afk"]],
+    ["WCSD-128", ["status-ready-to-build", "mode-hitl"]],
+  ]);
+  const adapter = createJiraTrackerAdapter({
+    requestJson: async (request) => {
+      const issueKey = request.path.match(/\/issue\/([^/?]+)/)?.[1];
+      if (request.method === "GET") {
+        return {
+          key: issueKey,
+          fields: {
+            summary: issueKey,
+            status: { name: "To Do" },
+            labels: labelsByIssue.get(issueKey) ?? [],
+          },
+        };
+      }
+      updates.push([request.path, request.body]);
+      return null;
+    },
+  });
+
+  await adapter.moveIssue("WCSD-127", "Done");
+  await adapter.moveIssue("WCSD-128", "Review");
+
+  assert.deepEqual(updates, [
+    [
+      "/rest/api/3/issue/WCSD-127",
+      { fields: { labels: ["mode-afk", "status-done"] } },
+    ],
+    [
+      "/rest/api/3/issue/WCSD-128",
+      { fields: { labels: ["mode-hitl", "status-review"] } },
+    ],
+  ]);
+});
+
+test("Jira adapter posts plain-text progress comments as Atlassian document content", async () => {
+  const requests = [];
+  const adapter = createJiraTrackerAdapter({
+    requestJson: async (request) => {
+      requests.push(request);
+      return { id: "10000" };
+    },
+  });
+
+  await adapter.addComment("WCSD-127", "Line one\n\nLine two");
+
+  assert.deepEqual(
+    requests.map((request) => [request.method, request.path]),
+    [["POST", "/rest/api/3/issue/WCSD-127/comment"]],
+  );
+  assert.deepEqual(requests[0].body, {
+    body: {
+      type: "doc",
+      version: 1,
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "Line one" }] },
+        { type: "paragraph", content: [{ type: "text", text: "Line two" }] },
+      ],
+    },
+  });
+  assert.equal(
+    requests.some((request) => /transitions/i.test(request.path)),
+    false,
+  );
+});
+
+test("runQueueExecution runs Jira AFK children and leaves HITL children unlaunched", async () => {
+  const calls = [];
+  const queueAfterFirstChild = {
+    parent: {
+      identifier: "WCSD-126",
+      title: "Jira parent",
+      state: { name: "Building", type: "started" },
+      labels: { nodes: [{ name: "resources" }] },
+    },
+    children: [
+      {
+        identifier: "WCSD-127",
+        title: "AFK child",
+        state: { name: "Done", type: "completed" },
+        labels: { nodes: [{ name: "mode:afk" }, { name: "resources" }] },
+      },
+      {
+        identifier: "WCSD-128",
+        title: "HITL child",
+        state: { name: "Ready to Build", type: "unstarted" },
+        labels: { nodes: [{ name: "mode:hitl" }, { name: "resources" }] },
+      },
+    ],
+  };
+
+  const result = await runQueueExecution(
+    {
+      parent: {
+        identifier: "WCSD-126",
+        title: "Jira parent",
+        state: { name: "Ready", type: "unstarted" },
+        labels: { nodes: [{ name: "resources" }] },
+      },
+      children: [
+        {
+          identifier: "WCSD-127",
+          title: "AFK child",
+          state: { name: "Ready to Build", type: "unstarted" },
+          labels: { nodes: [{ name: "mode:afk" }, { name: "resources" }] },
+        },
+        {
+          identifier: "WCSD-128",
+          title: "HITL child",
+          state: { name: "Ready to Build", type: "unstarted" },
+          labels: { nodes: [{ name: "mode:hitl" }, { name: "resources" }] },
+        },
+      ],
+    },
+    {
+      routing: {
+        documentsRoot: "/workspace",
+        projectsRoot: "/workspace/projects",
+        folderExists: (candidate) => candidate === "/workspace/projects/resources",
+      },
+      moveIssue: async (issueKey, state) => calls.push(["moveIssue", issueKey, state]),
+      addComment: async (issueKey) => calls.push(["addComment", issueKey]),
+      runWorker: async ({ childIssueKey }) => {
+        calls.push(["runWorker", childIssueKey]);
+        assert.equal(childIssueKey, "WCSD-127");
+        return {
+          stdout: JSON.stringify({
+            issueKey: "WCSD-127",
+            issueTitle: "AFK child",
+            outcome: "done",
+            summary: "Completed AFK child.",
+            changes: ["Implemented the AFK slice."],
+            tests: ["node --test resources/shared-workflows/pi/extensions/crosby/lib-v2.test.mjs"],
+            humanTestingRequired: false,
+            humanTestingInstructions: ["No targeted human testing required beyond normal code review."],
+          }),
+        };
+      },
+      refreshQueue: async () => {
+        calls.push(["refreshQueue"]);
+        return queueAfterFirstChild;
+      },
+      loadIssue: async (issueKey) =>
+        [...queueAfterFirstChild.children, queueAfterFirstChild.parent].find(
+          (issue) => issue.identifier === issueKey,
+        ),
+    },
+  );
+
+  assert.deepEqual(
+    calls.filter(([type]) => type === "runWorker"),
+    [["runWorker", "WCSD-127"]],
+  );
+  assert.deepEqual(
+    calls.filter(([type]) => type === "moveIssue"),
+    [
+      ["moveIssue", "WCSD-127", "Building"],
+      ["moveIssue", "WCSD-126", "Building"],
+      ["moveIssue", "WCSD-127", "Done"],
+    ],
+  );
+  assert.deepEqual(result.remainingByReason, { hitl: ["WCSD-128"] });
+});
+
 test("publishParentPullRequest pushes branch and creates PR when missing", async () => {
   const calls = [];
   const pullRequest = await publishParentPullRequest(

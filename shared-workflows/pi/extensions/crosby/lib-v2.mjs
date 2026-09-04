@@ -368,6 +368,12 @@ function hasUnresolvedBlockers(child) {
   return blockedBy.some((blocker) => blocker?.state?.name !== "Done");
 }
 
+function hasHitlMode(child) {
+  return getIssueLabelNames(child).some(
+    (label) => String(label).toLowerCase() === "mode:hitl",
+  );
+}
+
 function getNonRunnableReason(child) {
   if (hasUnresolvedBlockers(child)) return "blocked";
 
@@ -379,6 +385,7 @@ function getNonRunnableReason(child) {
 
   if (stateName === "done") return "done";
   if (stateName === "review" || stateName === "in review") return "review";
+  if (hasHitlMode(child)) return "hitl";
   if (stateName === "building" || stateName === "build") return null;
   if (stateName === "execute") return "building";
   if (stateName.includes("ready") && stateName.includes("build")) return null;
