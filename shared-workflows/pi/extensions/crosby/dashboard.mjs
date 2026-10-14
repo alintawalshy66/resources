@@ -8,9 +8,9 @@ import {
 } from "./lib-v2.mjs";
 
 const STATUS_ICONS = {
-  queued: "☐",
+  queued: "⏳",
   not_ready: "…",
-  blocked: "⏸",
+  blocked: "⏸︎",
   in_progress: "🔄",
   finishing: "⌛",
   done: "✅",
@@ -400,6 +400,10 @@ function formatElapsed(startedAt, finishedAt) {
 
 function renderTask(task) {
   const icon = STATUS_ICONS[task.status] ?? STATUS_ICONS.unknown;
+  const renderedIcon =
+    task.status === "blocked"
+      ? `\x1b[38;5;208m${icon}\x1b[39m`
+      : icon;
   const worker = task.workerPaneId ? ` — pane ${task.workerPaneId}` : "";
   const path = task.path && task.path !== task.issueKey ? ` [${task.path}]` : "";
   const reason = task.status === "blocked" && task.reason ? ` (${task.reason})` : "";
@@ -410,7 +414,7 @@ function renderTask(task) {
         ? formatElapsed(task.startedAt, task.finishedAt)
         : null;
   const elapsedText = elapsed ? ` ${elapsed}` : "";
-  return `${icon} ${task.issueKey} ${task.title}${worker}${path}${reason}${elapsedText}`;
+  return `${renderedIcon} ${task.issueKey} ${task.title}${worker}${path}${reason}${elapsedText}`;
 }
 
 const DASHBOARD_TASK_LINE_BUDGET = 14;

@@ -31,6 +31,7 @@ import {
   publishParentPullRequest,
   reviewParentPullRequest,
   runQueueExecution,
+  resumeChildExecution,
   runWatchCycle,
   runWatchMode,
 } from "./lib-v2.mjs";
@@ -233,6 +234,31 @@ test("assertNoLocalBranchCleanupRequired allows active parent and merged child b
           current: false,
           merged: true,
           upstream: "",
+          lastCommitDate: "2024-12-31T00:00:00.000Z",
+        },
+      ],
+      {
+        now: new Date("2025-01-01T00:00:00.000Z"),
+        baseBranch: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+        parentIssue: {
+          identifier: "#56",
+          branchName: "issue-56-add-jira-tracker-support-to-crosby-execution-flo",
+        },
+      },
+    ),
+  );
+});
+
+test("assertNoLocalBranchCleanupRequired allows a current unmerged child branch for the active parent run", () => {
+  assert.doesNotThrow(() =>
+    assertNoLocalBranchCleanupRequired(
+      [
+        {
+          name: "crosby/56/57-add-tracker-detection-and-adapter-boundary-for-c",
+          current: true,
+          merged: false,
+          upstream: "",
+          ahead: 1,
           lastCommitDate: "2024-12-31T00:00:00.000Z",
         },
       ],
@@ -454,7 +480,8 @@ test("buildRalphLoopPrompt uses Jira-specific read-only refresh instructions and
 
   assert.match(prompt, /Continue Crosby execution for issue WCSD-127\./);
   assert.match(prompt, /Crosby-owned read-only Jira view helper/i);
-  assert.match(prompt, /node shared-workflows\/pi\/extensions\/crosby\/jira-view\.mjs WCSD-127/);
+  assert.match(prompt, /jira-view\.mjs["']? WCSD-127/);
+  assert.match(prompt, /If the helper command fails, report the failure and stop/i);
   assert.match(prompt, /Do not mutate Jira labels or statuses directly/i);
   assert.match(prompt, /commit message must reference WCSD-127/i);
   assert.doesNotMatch(prompt, /gh issue view/i);
@@ -480,6 +507,28 @@ test("buildParentProgressComment includes human testing handoff", () => {
 
   assert.match(comment, /Human testing required: Yes/);
   assert.match(comment, /Open the portfolio page and hover the info icon/);
+});
+
+test("buildParentProgressComment truncates oversized worker details for tracker limits", () => {
+  const hugeFailure = "pytest failed\n".repeat(3000);
+  const comment = buildParentProgressComment({
+    child: { identifier: "WCSD-179", title: "Build board-based sprint velocity extraction" },
+    workerResult: {
+      outcome: "review",
+      summary: hugeFailure,
+      changes: Array.from({ length: 20 }, (_, index) => `${index}: ${hugeFailure}`),
+      tests: [hugeFailure],
+      requiredHumanAction: hugeFailure,
+      recoveryNotes: [hugeFailure],
+      humanTestingRequired: true,
+      humanTestingInstructions: [hugeFailure],
+    },
+  });
+
+  assert.ok(comment.length <= 8000);
+  assert.match(comment, /Comment truncated|entry truncated|summary truncated/);
+  assert.match(comment, /WCSD-179/);
+  assert.match(comment, /Status: Review/);
 });
 
 test("buildFinalParentSummary rolls up human QA guidance", () => {
@@ -780,6 +829,78 @@ test("runWatchCycle reports refreshed queues before skipping non-runnable childr
       ["#137", "Building"],
     ],
   );
+});
+
+test("resumeChildExecution validates, merges, and completes a reviewed child handoff", async () => {
+  const calls = [];
+  const result = await resumeChildExecution(
+    {
+      parent: {
+        identifier: "#129",
+        title: "Symphony",
+        branchName: "issue-129-symphony",
+        state: { name: "Building", type: "started" },
+      },
+      children: [
+        {
+          identifier: "#135",
+          title: "Manual recovery",
+          body: "## Test Command\nnode --test recovery.test.mjs",
+          state: { name: "Review", type: "review" },
+        },
+      ],
+    },
+    "#135",
+    {
+      assertBranchCleanupPreflight: async () => calls.push(["preflight"]),
+      ensureParentBranch: async () => calls.push(["ensureParentBranch"]),
+      prepareChildBranch: async () => ({
+        name: "crosby/129/135-manual-recovery",
+        parentBranch: "issue-129-symphony",
+        parentHead: "abc123",
+      }),
+      hasCommittedWorkSince: async () => ({
+        hasCommittedWork: true,
+        diagnostic: "New commit def456 found after abc123.",
+      }),
+      runVerificationCommand: async ({ command }) =>
+        calls.push(["verify", command]),
+      mergeChildBranchIntoParent: async ({ childBranch }) =>
+        calls.push(["merge", childBranch.name]),
+      moveIssue: async (issueKey, state) =>
+        calls.push(["moveIssue", issueKey, state]),
+      addComment: async (issueKey) => calls.push(["addComment", issueKey]),
+      refreshQueue: async () => ({
+        parent: {
+          identifier: "#129",
+          title: "Symphony",
+          branchName: "issue-129-symphony",
+          state: { name: "Building", type: "started" },
+        },
+        children: [
+          {
+            identifier: "#135",
+            title: "Manual recovery",
+            state: { name: "Done", type: "completed" },
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(result.resumedChild.identifier, "#135");
+  assert.deepEqual(calls, [
+    ["preflight"],
+    ["ensureParentBranch"],
+    ["moveIssue", "#129", "Building"],
+    ["moveIssue", "#135", "Building"],
+    ["verify", "node --test recovery.test.mjs"],
+    ["merge", "crosby/129/135-manual-recovery"],
+    ["moveIssue", "#135", "Done"],
+    ["addComment", "#135"],
+    ["addComment", "#129"],
+    ["moveIssue", "#129", "Review"],
+  ]);
 });
 
 test("runWatchMode continues polling after a fatal worker result", async () => {
@@ -1212,7 +1333,6 @@ test("runQueueExecution moves child to review and does not merge when verificati
     [
       ["moveIssue", "#135", "Building"],
       ["moveIssue", "#135", "Review"],
-      ["moveIssue", "#129", "Review"],
     ],
   );
   assert.equal(calls.some((call) => call[0] === "mergeChildBranch"), false);
@@ -1382,7 +1502,7 @@ test("runQueueExecution emits finalized and refreshed callbacks after each child
     ["moveIssue", "#135", "Building"],
     ["moveIssue", "#135", "Done"],
     ["finalized", "#135", "done", false],
-    ["addComment", "#129"],
+    ["addComment", "#135"],
     ["refreshQueue"],
     ["queueRefreshed", "#129", "Done"],
     ["addComment", "#129"],
@@ -1397,6 +1517,10 @@ test("parseCrosbyCommandArgs supports push and review commands", async () => {
     issueKey: "#13",
   });
   assert.deepEqual(parseCrosbyCommandArgs("--watch"), { mode: "watch" });
+  assert.deepEqual(parseCrosbyCommandArgs("resume WCSD-218"), {
+    mode: "resume",
+    issueKey: "WCSD-218",
+  });
   assert.deepEqual(parseCrosbyCommandArgs("push #13"), {
     mode: "push",
     issueKey: "#13",
@@ -1478,13 +1602,11 @@ test("tracker detection preserves GitHub issue references and watch parsing", ()
   assert.deepEqual(parseCrosbyCommandArgs("--watch"), { mode: "watch" });
 });
 
-test("normalizeJiraLabels converts known Jira-safe labels and preserves unknown labels", () => {
+test("normalizeJiraLabels normalizes metadata and ignores legacy Jira status labels", () => {
   assert.deepEqual(
     normalizeJiraLabels([
-      "status-ready-to-build",
-      "status-building",
-      "status-review",
-      "status-done",
+      "type-parent",
+      "type-child",
       "mode-afk",
       "mode-hitl",
       "effort-medium",
@@ -1494,10 +1616,8 @@ test("normalizeJiraLabels converts known Jira-safe labels and preserves unknown 
       "pi-resources",
     ]),
     [
-      "status:ready-to-build",
-      "status:building",
-      "status:review",
-      "status:done",
+      "type:parent",
+      "type:child",
       "mode:afk",
       "mode:hitl",
       "effort:medium",
@@ -1531,11 +1651,32 @@ test("loadJiraConfig reads credentials from env before optional dotenv fallback"
   });
 });
 
-test("Jira adapter loads a root issue and direct children into Crosby issue shape", async () => {
+test("Jira adapter loads a root issue, respects native Blocks direction, and loads direct children", async () => {
   const requested = [];
   const adapter = createJiraTrackerAdapter({
     requestJson: async (request) => {
       requested.push(request);
+      if (request.path === "/rest/api/3/issue/WCSD-126/comment?maxResults=100&orderBy=-created") {
+        return {
+          comments: [
+            {
+              id: "20001",
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  { type: "paragraph", content: [{ type: "text", text: "WCSD-127 — Child issue" }] },
+                  { type: "paragraph", content: [{ type: "text", text: "Status: Done" }] },
+                ],
+              },
+              created: "2026-09-11T00:00:00.000+0000",
+              updated: "2026-09-11T00:00:00.000+0000",
+              author: { displayName: "Crosby" },
+            },
+          ],
+        };
+      }
+
       if (request.path.startsWith("/rest/api/3/issue/WCSD-126")) {
         return {
           key: "WCSD-126",
@@ -1544,7 +1685,30 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
             summary: "Parent issue",
             description: "Parent body\nBranch: issue-126-parent-issue",
             status: { name: "In Progress" },
-            labels: ["status-building", "mode-afk", "pi-resources"],
+            components: [{ id: "10447", name: "OpenAI GPT-5.5" }],
+            issuelinks: [
+              {
+                type: { name: "Blocks" },
+                outwardIssue: {
+                  key: "WCSD-125",
+                  fields: {
+                    summary: "Issue blocked by parent",
+                    status: { name: "Done" },
+                  },
+                },
+              },
+              {
+                type: { name: "Blocks" },
+                inwardIssue: {
+                  key: "WCSD-128",
+                  fields: {
+                    summary: "Active blocker",
+                    status: { name: "Ready to build" },
+                  },
+                },
+              },
+            ],
+            labels: ["type-parent", "status-building", "mode-afk", "pi-resources"],
           },
         };
       }
@@ -1560,8 +1724,10 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
             fields: {
               summary: "Child issue",
               description: "Child body",
-              status: { name: "To Do" },
-              labels: ["status-ready-to-build", "effort-medium", "custom-routing"],
+              status: { name: "Ready to build" },
+              issuetype: { name: "Sub-task", subtask: true },
+              components: [{ id: "10446", name: "Anthropic Claude Opus 4.7" }],
+              labels: ["type-child", "status-ready-to-build", "effort-medium", "custom-routing"],
             },
           },
         ],
@@ -1571,15 +1737,24 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
 
   const queue = await adapter.fetchParentQueue("WCSD-126");
 
-  assert.equal(requested.length, 2);
+  assert.equal(requested.length, 3);
   assert.equal(queue.parent.identifier, "WCSD-126");
   assert.equal(queue.parent.title, "Parent issue");
   assert.equal(queue.parent.trackerStatus, "In Progress");
   assert.equal(queue.parent.branchName, "issue-126-parent-issue");
   assert.equal(queue.parent.state.name, "Building");
+  assert.equal(queue.parent.modelOverride, "github-copilot/gpt-5.5");
+  assert.deepEqual(queue.parent.relations.blockedBy, [
+    {
+      identifier: "WCSD-128",
+      title: "Active blocker",
+      state: { name: "Ready to Build", type: "unstarted" },
+    },
+  ]);
+  assert.deepEqual(queue.parent.comments.nodes.map((comment) => comment.body), ["WCSD-127 — Child issue\nStatus: Done"]);
   assert.deepEqual(
     queue.parent.labels.nodes.map((label) => label.name),
-    ["status:building", "mode:afk", "pi-resources"],
+    ["type:parent", "mode:afk", "pi-resources"],
   );
   assert.deepEqual(
     queue.children.map((child) => ({
@@ -1587,36 +1762,76 @@ test("Jira adapter loads a root issue and direct children into Crosby issue shap
       title: child.title,
       trackerStatus: child.trackerStatus,
       state: child.state,
+      modelOverride: child.modelOverride,
       labels: child.labels.nodes.map((label) => label.name),
     })),
     [
       {
         identifier: "WCSD-127",
         title: "Child issue",
-        trackerStatus: "To Do",
+        trackerStatus: "Ready to build",
         state: { name: "Ready to Build", type: "unstarted" },
-        labels: ["status:ready-to-build", "effort:medium", "custom-routing"],
+        modelOverride: "github-copilot/claude-opus-4.7",
+        labels: ["type:child", "effort:medium", "custom-routing"],
       },
     ],
   );
 });
 
-test("Jira adapter mutates only labels when moving issues", async () => {
-  const requests = [];
+test("Jira adapter derives a parent branch name when Jira issue has no Branch line", async () => {
   const adapter = createJiraTrackerAdapter({
     requestJson: async (request) => {
-      requests.push(request);
-      if (request.method === "GET") {
+      if (request.path === "/rest/api/3/issue/WCSD-137/comment?maxResults=100&orderBy=-created") {
+        return { comments: [] };
+      }
+
+      if (request.path.startsWith("/rest/api/3/issue/WCSD-137")) {
         return {
-          key: "WCSD-127",
+          key: "WCSD-137",
           fields: {
-            summary: "Child issue",
+            summary: "Build Jira Crosby Queue",
+            description: "Parent body without explicit branch",
             status: { name: "To Do" },
-            labels: ["status-ready-to-build", "mode-afk", "custom-routing"],
+            labels: ["type-parent", "status-execute", "pi-resources"],
           },
         };
       }
-      return null;
+
+      return { issues: [] };
+    },
+  });
+
+  const queue = await adapter.fetchParentQueue("WCSD-137");
+
+  assert.equal(queue.parent.branchName, "issue-wcsd-137-build-jira-crosby-queue");
+});
+
+test("Jira adapter transitions native Jira statuses and verifies the result", async () => {
+  const requests = [];
+  let currentStatus = "Ready to build";
+  const adapter = createJiraTrackerAdapter({
+    requestJson: async (request) => {
+      requests.push(request);
+      if (request.method === "GET" && request.path.includes("/transitions")) {
+        return {
+          transitions: [
+            { id: "31", name: "Start building", to: { id: "400", name: "Building" } },
+            { id: "41", name: "Send to review", to: { id: "10076", name: "Review" } },
+          ],
+        };
+      }
+      if (request.method === "POST" && request.path.includes("/transitions")) {
+        currentStatus = request.body.transition.id === "31" ? "Building" : "Review";
+        return null;
+      }
+      return {
+        key: "WCSD-127",
+        fields: {
+          summary: "Child issue",
+          status: { name: currentStatus },
+          labels: ["status-ready-to-build", "mode-afk", "custom-routing"],
+        },
+      };
     },
   });
 
@@ -1625,58 +1840,57 @@ test("Jira adapter mutates only labels when moving issues", async () => {
   assert.deepEqual(
     requests.map((request) => [request.method, request.path]),
     [
-      ["GET", "/rest/api/3/issue/WCSD-127?fields=summary,description,status,labels,parent"],
-      ["PUT", "/rest/api/3/issue/WCSD-127"],
+      ["GET", "/rest/api/3/issue/WCSD-127?fields=summary,description,status,labels,parent,issuetype,components,issuelinks"],
+      ["GET", "/rest/api/3/issue/WCSD-127/transitions"],
+      ["POST", "/rest/api/3/issue/WCSD-127/transitions"],
+      ["GET", "/rest/api/3/issue/WCSD-127?fields=summary,description,status,labels,parent,issuetype,components,issuelinks"],
     ],
   );
-  assert.deepEqual(requests[1].body, {
-    fields: {
-      labels: ["mode-afk", "custom-routing", "status-building"],
-    },
-  });
-  assert.equal(
-    requests.some((request) => /transitions/i.test(request.path)),
-    false,
-  );
+  assert.deepEqual(requests[2].body, { transition: { id: "31" } });
+  assert.equal(requests.some((request) => request.method === "PUT"), false);
 });
 
-test("Jira adapter maps Crosby review and done states to Jira-safe labels", async () => {
-  const updates = [];
-  const labelsByIssue = new Map([
-    ["WCSD-127", ["status-building", "mode-afk"]],
-    ["WCSD-128", ["status-ready-to-build", "mode-hitl"]],
-  ]);
+test("Jira adapter maps Review and Done from native Jira statuses", async () => {
+  const requests = [];
+  let currentStatus = "Building";
   const adapter = createJiraTrackerAdapter({
     requestJson: async (request) => {
-      const issueKey = request.path.match(/\/issue\/([^/?]+)/)?.[1];
-      if (request.method === "GET") {
+      requests.push(request);
+      if (request.method === "GET" && request.path.includes("/transitions")) {
         return {
-          key: issueKey,
-          fields: {
-            summary: issueKey,
-            status: { name: "To Do" },
-            labels: labelsByIssue.get(issueKey) ?? [],
-          },
+          transitions: [
+            { id: "41", to: { id: "10076", name: "Review" } },
+            { id: "51", to: { id: "10015", name: "Done" } },
+          ],
         };
       }
-      updates.push([request.path, request.body]);
-      return null;
+      if (request.method === "POST" && request.path.includes("/transitions")) {
+        currentStatus = request.body.transition.id === "41" ? "Review" : "Done";
+        return null;
+      }
+      return {
+        key: "WCSD-127",
+        fields: {
+          summary: "Child issue",
+          status: { name: currentStatus },
+          labels: ["status-building", "mode-afk"],
+        },
+      };
     },
   });
 
+  await adapter.moveIssue("WCSD-127", "Review");
   await adapter.moveIssue("WCSD-127", "Done");
-  await adapter.moveIssue("WCSD-128", "Review");
 
-  assert.deepEqual(updates, [
+  assert.deepEqual(
+    requests
+      .filter((request) => request.method === "POST")
+      .map((request) => request.body),
     [
-      "/rest/api/3/issue/WCSD-127",
-      { fields: { labels: ["mode-afk", "status-done"] } },
+      { transition: { id: "41" } },
+      { transition: { id: "51" } },
     ],
-    [
-      "/rest/api/3/issue/WCSD-128",
-      { fields: { labels: ["mode-hitl", "status-review"] } },
-    ],
-  ]);
+  );
 });
 
 test("Jira adapter posts plain-text progress comments as Atlassian document content", async () => {
@@ -1708,6 +1922,26 @@ test("Jira adapter posts plain-text progress comments as Atlassian document cont
     requests.some((request) => /transitions/i.test(request.path)),
     false,
   );
+});
+
+test("Jira adapter truncates oversized comments as a final safety net", async () => {
+  const requests = [];
+  const adapter = createJiraTrackerAdapter({
+    requestJson: async (request) => {
+      requests.push(request);
+      return { id: "10000" };
+    },
+  });
+
+  await adapter.addComment("WCSD-127", "pytest failed\n".repeat(20000));
+
+  const postedText = requests[0].body.body.content
+    .flatMap((node) => node.content ?? [])
+    .map((node) => node.text ?? "")
+    .join("\n");
+
+  assert.ok(postedText.length <= 8000);
+  assert.match(postedText, /Comment truncated by Crosby before posting to Jira/);
 });
 
 test("runQueueExecution runs Jira AFK children and leaves HITL children unlaunched", async () => {
@@ -2045,6 +2279,16 @@ test("extractLabelValue returns null for empty or missing prefix", () => {
   const child = { labels: ["model:gpt-5.5"] };
   assert.equal(extractLabelValue(child, ""), null);
   assert.equal(extractLabelValue(child, undefined), null);
+});
+
+test("extractModelOverride prefers the Jira component model override over labels", () => {
+  assert.equal(
+    extractModelOverride({
+      modelOverride: "github-copilot/gpt-5.6-sol",
+      labels: ["model:github-copilot/gpt-5.5"],
+    }),
+    "github-copilot/gpt-5.6-sol",
+  );
 });
 
 test("extractModelOverride wraps extractLabelValue with the model: prefix", () => {

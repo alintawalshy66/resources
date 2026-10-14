@@ -2,15 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 
-const DEFAULT_FALLBACK_ENV_PATH = "/home/walsc0/projects/dlhub/backend/.env";
+const DEFAULT_FALLBACK_ENV_PATH = "/home/developer/projects/dlhub/backend/.env";
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
-const JIRA_STATUS_LABELS = new Map([
-  ["status-ready", "status:ready"],
-  ["status-execute", "status:execute"],
-  ["status-ready-to-build", "status:ready-to-build"],
-  ["status-building", "status:building"],
-  ["status-review", "status:review"],
-  ["status-done", "status:done"],
+const JIRA_TYPE_LABELS = new Map([
+  ["type-parent", "type:parent"],
+  ["type-child", "type:child"],
 ]);
 const JIRA_MODE_LABELS = new Map([
   ["mode-afk", "mode:afk"],
@@ -37,16 +33,23 @@ const JIRA_MODEL_LABELS = new Map([
   ["model-github-copilot-claude-sonnet-4.5", "model:github-copilot/claude-sonnet-4.5"],
   ["model-github-copilot-claude-sonnet-4.7", "model:github-copilot/claude-sonnet-4.7"],
 ]);
-const JIRA_SAFE_STATUS_LABEL_BY_STATE = new Map([
-  ["ready", "status-ready"],
-  ["execute", "status-execute"],
-  ["ready to build", "status-ready-to-build"],
-  ["building", "status-building"],
-  ["build", "status-building"],
-  ["review", "status-review"],
-  ["in review", "status-review"],
-  ["done", "status-done"],
+const JIRA_MODEL_COMPONENTS = new Map([
+  ["openai gpt-5.5", "github-copilot/gpt-5.5"],
+  ["openai gpt-5.6 luna", "github-copilot/gpt-5.6-luna"],
+  ["openai gpt-5.6 sol", "github-copilot/gpt-5.6-sol"],
+  ["anthropic claude opus 4.7", "github-copilot/claude-opus-4.7"],
+  ["anthropic claude opus 5", "github-copilot/claude-opus-5"],
 ]);
+const JIRA_STATUS_BY_CROSBY_STATE = new Map([
+  ["backlog", "Backlog"],
+  ["ready to build", "Ready to build"],
+  ["building", "Building"],
+  ["build", "Building"],
+  ["review", "Review"],
+  ["in review", "Review"],
+  ["done", "Done"],
+]);
+const MAX_JIRA_COMMENT_CHARS = 8000;
 
 function parseDotenvValue(rawValue) {
   let value = String(rawValue ?? "").trim();
@@ -137,10 +140,11 @@ export function normalizeJiraLabels(labels) {
   return (Array.isArray(labels) ? labels : [])
     .map((label) => String(label ?? "").trim())
     .filter(Boolean)
+    .filter((label) => !/^status[-:]/i.test(label))
     .map((label) => {
       const normalized = label.toLowerCase();
       return (
-        JIRA_STATUS_LABELS.get(normalized) ??
+        JIRA_TYPE_LABELS.get(normalized) ??
         JIRA_MODE_LABELS.get(normalized) ??
         JIRA_EFFORT_LABELS.get(normalized) ??
         JIRA_WORK_TYPE_LABELS.get(normalized) ??
@@ -150,28 +154,42 @@ export function normalizeJiraLabels(labels) {
     });
 }
 
-function getStateFromLabels(labels) {
-  const normalizedLabels = normalizeJiraLabels(labels);
-  const statusLabel = normalizedLabels.find((label) => label.startsWith("status:"));
-  switch (statusLabel) {
-    case "status:done":
-      return { name: "Done", type: "completed" };
-    case "status:building":
-      return { name: "Building", type: "started" };
-    case "status:execute":
-      return { name: "Execute", type: "started" };
-    case "status:review":
-      return { name: "Review", type: "review" };
-    case "status:ready-to-build":
+function normalizeJiraStatus(status) {
+  return String(status ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function getStateFromJiraStatus(status) {
+  switch (normalizeJiraStatus(status)) {
+    case "ready to build":
       return { name: "Ready to Build", type: "unstarted" };
-    case "status:ready":
-      return { name: "Ready", type: "unstarted" };
+    case "building":
+    case "in progress":
+      return { name: "Building", type: "started" };
+    case "review":
+      return { name: "Review", type: "review" };
+    case "done":
+    case "withdrawn":
+      return { name: "Done", type: "completed" };
+    case "backlog":
+      return { name: "Backlog", type: "unstarted" };
     default:
-      return { name: "Unknown", type: "unstarted" };
+      return { name: String(status ?? "Unknown").trim() || "Unknown", type: "unstarted" };
   }
 }
 
-function deriveBranchNameFromJiraIssue(description, labels) {
+function slugifyBranchPart(value, fallback = "issue") {
+  const slug = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return slug || fallback;
+}
+
+function deriveBranchNameFromJiraIssue(description, labels, issueKey, summary) {
   const bodyMatch = String(description ?? "").match(/(?:^|\n)\s*Branch:\s*([^\n]+)\s*/i);
   if (bodyMatch?.[1]?.trim()) return bodyMatch[1].trim();
 
@@ -180,7 +198,7 @@ function deriveBranchNameFromJiraIssue(description, labels) {
   );
   if (branchLabel) return String(branchLabel).replace(/^branch:/i, "").trim();
 
-  return undefined;
+  return `issue-${slugifyBranchPart(issueKey)}-${slugifyBranchPart(summary)}`;
 }
 
 function adfToPlainText(node) {
@@ -196,13 +214,51 @@ function adfToPlainText(node) {
   return childText;
 }
 
+function getJiraComponentNames(components) {
+  return (Array.isArray(components) ? components : [])
+    .map((component) => ({
+      id: component?.id,
+      name: String(component?.name ?? "").trim(),
+    }))
+    .filter((component) => component.name);
+}
+
+function getJiraModelOverride(components, issueKey) {
+  const overrides = [
+    ...new Set(
+      getJiraComponentNames(components)
+        .map((component) => JIRA_MODEL_COMPONENTS.get(component.name.toLowerCase()))
+        .filter(Boolean),
+    ),
+  ];
+  if (overrides.length > 1) {
+    throw new Error(
+      `Jira issue ${issueKey} has multiple model components: ${overrides.join(", ")}. Recovery: keep exactly one approved model component on the issue before running Crosby.`,
+    );
+  }
+  return overrides[0] ?? null;
+}
+
 function toCrosbyJiraIssue(jiraIssue, children = []) {
   const fields = jiraIssue?.fields ?? {};
   const key = getIssueKey(jiraIssue?.key);
   const rawLabels = Array.isArray(fields.labels) ? fields.labels : [];
   const labels = normalizeJiraLabels(rawLabels).map((name) => ({ name }));
+  const components = getJiraComponentNames(fields.components);
+  const modelOverride = getJiraModelOverride(fields.components, key);
   const trackerStatus = String(fields.status?.name ?? "").trim() || "Unknown";
+  const blockedBy = (Array.isArray(fields.issuelinks) ? fields.issuelinks : [])
+    .filter((link) => String(link?.type?.name ?? "").toLowerCase() === "blocks")
+    .filter((link) => link?.inwardIssue?.key)
+    .map((link) => ({
+      identifier: link.inwardIssue.key,
+      title: link.inwardIssue.fields?.summary ?? link.inwardIssue.key,
+      state: getStateFromJiraStatus(link.inwardIssue.fields?.status?.name),
+    }));
   const description = adfToPlainText(fields.description).trim();
+  const comments = Array.isArray(jiraIssue?.comments?.nodes)
+    ? jiraIssue.comments.nodes
+    : [];
 
   return {
     key,
@@ -213,11 +269,16 @@ function toCrosbyJiraIssue(jiraIssue, children = []) {
     url: jiraIssue?.browseUrl,
     tracker: "jira",
     trackerStatus,
-    branchName: deriveBranchNameFromJiraIssue(description, rawLabels),
-    state: getStateFromLabels(rawLabels),
+    branchName: deriveBranchNameFromJiraIssue(description, rawLabels, key, fields.summary ?? key),
+    state: getStateFromJiraStatus(trackerStatus),
     labels: { nodes: labels },
+    components: { nodes: components },
+    modelOverride,
+    issueType: fields.issuetype?.name,
     parent: fields.parent?.key ? { identifier: fields.parent.key } : undefined,
+    relations: blockedBy.length > 0 ? { blockedBy } : undefined,
     children,
+    comments: { nodes: comments },
   };
 }
 
@@ -275,7 +336,15 @@ function encodeIssueBasePath(issueKey) {
 }
 
 function encodeIssuePath(issueKey) {
-  return `${encodeIssueBasePath(issueKey)}?fields=summary,description,status,labels,parent`;
+  return `${encodeIssueBasePath(issueKey)}?fields=summary,description,status,labels,parent,issuetype,components,issuelinks`;
+}
+
+function encodeIssueTransitionsPath(issueKey) {
+  return `${encodeIssueBasePath(issueKey)}/transitions`;
+}
+
+function encodeIssueCommentsPath(issueKey) {
+  return `${encodeIssueBasePath(issueKey)}/comment?maxResults=100&orderBy=-created`;
 }
 
 function attachBrowseUrl(issue, config) {
@@ -286,40 +355,24 @@ function attachBrowseUrl(issue, config) {
   return issue;
 }
 
-function getSafeStatusLabelForState(state) {
-  const normalized = String(state ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-  return JIRA_SAFE_STATUS_LABEL_BY_STATE.get(normalized) ?? null;
+function getJiraStatusForState(state) {
+  return JIRA_STATUS_BY_CROSBY_STATE.get(normalizeJiraStatus(state)) ?? null;
 }
 
-function isJiraStatusLabel(label) {
-  return normalizeJiraLabels([label])[0]?.startsWith("status:") === true;
+function statusMatches(actual, expected) {
+  return normalizeJiraStatus(actual) === normalizeJiraStatus(expected);
 }
 
-function labelsForState(currentLabels, state) {
-  const targetLabel = getSafeStatusLabelForState(state);
-  if (!targetLabel) return null;
+function limitJiraCommentText(text, maxChars = MAX_JIRA_COMMENT_CHARS) {
+  const value = String(text ?? "").trimEnd();
+  if (value.length <= maxChars) return value;
 
-  const nextLabels = [];
-  const seen = new Set();
-  for (const label of Array.isArray(currentLabels) ? currentLabels : []) {
-    const trimmed = String(label ?? "").trim();
-    if (!trimmed || isJiraStatusLabel(trimmed) || seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    nextLabels.push(trimmed);
-  }
-
-  if (!seen.has(targetLabel)) {
-    nextLabels.push(targetLabel);
-  }
-
-  return nextLabels;
+  const suffix = "\n\n[Comment truncated by Crosby before posting to Jira to stay within Jira comment size limits. See the Crosby worker transcript or branch commits for full details.]";
+  return `${value.slice(0, Math.max(0, maxChars - suffix.length)).trimEnd()}${suffix}`;
 }
 
 function plainTextToAdf(text) {
-  const paragraphs = String(text ?? "")
+  const paragraphs = limitJiraCommentText(text)
     .split(/\r?\n/)
     .filter((line) => line.trim().length > 0)
     .map((line) => ({
@@ -341,9 +394,24 @@ export function createJiraTrackerAdapter(options = {}) {
       ? options.requestJson
       : (request) => defaultRequestJson(config, request);
 
-  async function loadRawIssue(issueKey) {
+  async function loadIssueComments(issueKey) {
+    const commentsResult = await requestJson({ method: "GET", path: encodeIssueCommentsPath(issueKey) });
+    return (Array.isArray(commentsResult?.comments) ? commentsResult.comments : []).map((comment) => ({
+      id: comment?.id,
+      body: adfToPlainText(comment?.body).trim(),
+      createdAt: comment?.created,
+      updatedAt: comment?.updated,
+      author: comment?.author?.displayName ?? comment?.author?.accountId,
+    }));
+  }
+
+  async function loadRawIssue(issueKey, options = {}) {
     const issue = await requestJson({ method: "GET", path: encodeIssuePath(issueKey) });
-    return attachBrowseUrl(issue, config);
+    const withBrowseUrl = attachBrowseUrl(issue, config);
+    if (options.includeComments) {
+      withBrowseUrl.comments = { nodes: await loadIssueComments(issueKey) };
+    }
+    return withBrowseUrl;
   }
 
   async function loadDirectChildren(issueKey) {
@@ -352,7 +420,7 @@ export function createJiraTrackerAdapter(options = {}) {
       path: "/rest/api/3/search/jql",
       body: {
         jql: `parent = ${issueKey} ORDER BY key ASC`,
-        fields: ["summary", "description", "status", "labels", "parent"],
+        fields: ["summary", "description", "status", "labels", "parent", "issuetype", "components", "issuelinks"],
         maxResults: 100,
       },
     });
@@ -374,7 +442,7 @@ export function createJiraTrackerAdapter(options = {}) {
   async function fetchParentQueue(issueRef) {
     const issueKey = getIssueKey(issueRef);
     const [root, children] = await Promise.all([
-      loadRawIssue(issueKey),
+      loadRawIssue(issueKey, { includeComments: true }),
       loadDirectChildren(issueKey),
     ]);
 
@@ -386,19 +454,50 @@ export function createJiraTrackerAdapter(options = {}) {
 
   async function moveIssue(issueRef, state) {
     const issueKey = getIssueKey(issueRef);
+    const targetStatus = getJiraStatusForState(state);
+    if (!targetStatus) {
+      throw new Error(
+        `Unsupported Crosby Jira state '${state}'. Recovery: use Backlog, Ready to build, Building, Review, or Done.`,
+      );
+    }
+
     const issue = await loadRawIssue(issueKey);
-    const nextLabels = labelsForState(issue?.fields?.labels, state);
-    if (!nextLabels) return;
+    const currentStatus = issue?.fields?.status?.name;
+    if (statusMatches(currentStatus, targetStatus)) return;
+
+    const transitionsResult = await requestJson({
+      method: "GET",
+      path: encodeIssueTransitionsPath(issueKey),
+    });
+    const transitions = Array.isArray(transitionsResult?.transitions)
+      ? transitionsResult.transitions
+      : [];
+    const transition = transitions.find((candidate) =>
+      statusMatches(candidate?.to?.name, targetStatus),
+    );
+
+    if (!transition?.id) {
+      const available = transitions
+        .map((candidate) => candidate?.to?.name)
+        .filter(Boolean);
+      throw new Error(
+        `Jira issue ${issueKey} cannot transition from '${currentStatus ?? "Unknown"}' to '${targetStatus}'. Available destinations: ${available.join(", ") || "none"}. Recovery: check the WCSD workflow and rerun Crosby after the issue has a valid transition.`,
+      );
+    }
 
     await requestJson({
-      method: "PUT",
-      path: encodeIssueBasePath(issueKey),
-      body: {
-        fields: {
-          labels: nextLabels,
-        },
-      },
+      method: "POST",
+      path: encodeIssueTransitionsPath(issueKey),
+      body: { transition: { id: String(transition.id) } },
     });
+
+    const refreshed = await loadRawIssue(issueKey);
+    const refreshedStatus = refreshed?.fields?.status?.name;
+    if (!statusMatches(refreshedStatus, targetStatus)) {
+      throw new Error(
+        `Jira transition for ${issueKey} did not reach '${targetStatus}'. Actual status after transition: '${refreshedStatus ?? "Unknown"}'. Recovery: inspect the issue in Jira before rerunning Crosby.`,
+      );
+    }
   }
 
   async function addComment(issueRef, body) {

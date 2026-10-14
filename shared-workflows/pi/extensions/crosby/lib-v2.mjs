@@ -1,5 +1,9 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const CROSBY_EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
+const JIRA_VIEW_HELPER_PATH = path.join(CROSBY_EXTENSION_DIR, "jira-view.mjs");
 
 const DEFAULT_DOCUMENTS_ROOT = process.env.HOME ?? "/home/walsc0";
 
@@ -37,7 +41,7 @@ export function parseCrosbyCommandArgs(args) {
 
   if (
     tokens.length === 2 &&
-    ["push", "review"].includes(tokens[0].toLowerCase())
+    ["push", "review", "resume"].includes(tokens[0].toLowerCase())
   ) {
     return { mode: tokens[0].toLowerCase(), issueKey: tokens[1] };
   }
@@ -48,12 +52,12 @@ export function parseCrosbyCommandArgs(args) {
 
   if (tokens.length === 0) {
     throw new Error(
-      "Usage: /crosby <PARENT-GITHUB-ISSUE> | /crosby --watch | /crosby push <PARENT-GITHUB-ISSUE> | /crosby review <PARENT-GITHUB-ISSUE>",
+      "Usage: /crosby <PARENT-GITHUB-ISSUE> | /crosby --watch | /crosby push <PARENT-GITHUB-ISSUE> | /crosby review <PARENT-GITHUB-ISSUE> | /crosby resume <CHILD-ISSUE>",
     );
   }
 
   throw new Error(
-    "/crosby accepts exactly one parent issue reference, the --watch flag, or 'push/review <PARENT-GITHUB-ISSUE>'. Recovery: rerun /crosby #116, /crosby --watch, /crosby push #116, or /crosby review #116.",
+    "/crosby accepts exactly one parent issue reference, the --watch flag, or 'push/review <PARENT-GITHUB-ISSUE>' / 'resume <CHILD-ISSUE>'. Recovery: rerun /crosby #116, /crosby --watch, /crosby push #116, /crosby review #116, or /crosby resume WCSD-218.",
   );
 }
 
@@ -232,7 +236,8 @@ export function extractLabelValue(issue, prefix) {
 }
 
 export function extractModelOverride(issue) {
-  return extractLabelValue(issue, "model:");
+  const componentModel = String(issue?.modelOverride ?? "").trim();
+  return componentModel || extractLabelValue(issue, "model:");
 }
 
 export function extractEffortOverride(issue) {
@@ -523,6 +528,16 @@ function isAllowedBranchForCrosbyRun(branch, options = {}) {
 
   if (branchName === "main") return true;
   if (parentBranchName && branchName === parentBranchName) return true;
+
+  const parentNumber = getCleanupParentIssueNumber(options);
+  if (
+    parentNumber &&
+    isCurrentLocalBranch(branch) &&
+    branchName.startsWith(`crosby/${parentNumber}/`)
+  ) {
+    return true;
+  }
+
   if (isMergedCrosbyChildBranchForParent(branch, options)) return true;
 
   return false;
@@ -779,6 +794,7 @@ function buildWorkerCommitProtocol(issueReference) {
     "- Run git status --porcelain and verify git status --porcelain is empty before returning outcome done.",
     "- Include the resulting commit hash or hashes in changes[].",
     "- If you cannot commit, cannot make git status --porcelain empty, or cannot provide commit hashes, return outcome review with requiredHumanAction instead of done.",
+    `- If this is manual recovery after a Review result, finish the commit and tell the operator to run /crosby resume ${issueReference}; do not change Jira status yourself.`,
   ];
 }
 
@@ -800,11 +816,12 @@ function getWorkerPromptTracker(child) {
 
 function buildWorkerRefreshInstructions(child, issueKey) {
   if (getWorkerPromptTracker(child) === "jira") {
-    const jiraViewCommand = `node shared-workflows/pi/extensions/crosby/jira-view.mjs ${issueKey}`;
+    const jiraViewCommand = `node ${JSON.stringify(JIRA_VIEW_HELPER_PATH)} ${issueKey}`;
     return [
       `- The assigned Jira issue key is ${issueKey}.`,
       `- Use the Crosby-owned read-only Jira view helper instead of GitHub CLI issue viewing: '${jiraViewCommand}'.`,
       `- First refresh the Jira issue with '${jiraViewCommand}'.`,
+      "- If the helper command fails, report the failure and stop; do not search the entire filesystem for the helper.",
       "- Do not mutate Jira labels or statuses directly; Crosby owns Jira state transitions and comments.",
     ];
   }
@@ -875,15 +892,15 @@ export function buildRalphLoopPrompt(child) {
   ].join("\n");
 }
 
-function formatBulletList(entries, fallback = "- None.") {
+function formatBulletList(entries, fallback = "- None.", options = {}) {
   return Array.isArray(entries) && entries.length > 0
-    ? entries.map((entry) => `- ${entry}`).join("\n")
+    ? truncateListEntries(entries, options).map((entry) => `- ${entry}`).join("\n")
     : fallback;
 }
 
-function formatNumberedList(entries, fallback = "1. No targeted human testing instructions captured; perform normal acceptance review.") {
+function formatNumberedList(entries, fallback = "1. No targeted human testing instructions captured; perform normal acceptance review.", options = {}) {
   return Array.isArray(entries) && entries.length > 0
-    ? entries.map((entry, index) => `${index + 1}. ${entry}`).join("\n")
+    ? truncateListEntries(entries, options).map((entry, index) => `${index + 1}. ${entry}`).join("\n")
     : fallback;
 }
 
@@ -905,6 +922,42 @@ function getHumanTestingInstructions(source) {
     : [];
 }
 
+const MAX_TRACKER_COMMENT_CHARS = 8000;
+const MAX_BULLET_ENTRIES = 8;
+const MAX_BULLET_ENTRY_CHARS = 800;
+const MAX_DIAGNOSTIC_CHARS = 1200;
+
+function truncateText(value, maxChars, suffixLabel = "truncated") {
+  const text = String(value ?? "").trim();
+  if (text.length <= maxChars) return text;
+
+  const suffix = ` …[${suffixLabel}: ${text.length - maxChars} chars omitted]`;
+  return `${text.slice(0, Math.max(0, maxChars - suffix.length)).trimEnd()}${suffix}`;
+}
+
+function truncateListEntries(entries, options = {}) {
+  const maxEntries = options.maxEntries ?? MAX_BULLET_ENTRIES;
+  const maxEntryChars = options.maxEntryChars ?? MAX_BULLET_ENTRY_CHARS;
+  const source = Array.isArray(entries) ? entries : [];
+  const visible = source
+    .slice(0, maxEntries)
+    .map((entry) => truncateText(entry, maxEntryChars, "entry truncated"));
+
+  if (source.length > maxEntries) {
+    visible.push(`…${source.length - maxEntries} more entries omitted to keep the tracker comment within size limits.`);
+  }
+
+  return visible;
+}
+
+function limitTrackerCommentBody(body, maxChars = MAX_TRACKER_COMMENT_CHARS) {
+  const text = String(body ?? "").trimEnd();
+  if (text.length <= maxChars) return text;
+
+  const suffix = "\n\n[Comment truncated by Crosby to stay within tracker comment size limits. See the worker transcript, branch commits, or PR for full details.]";
+  return `${text.slice(0, Math.max(0, maxChars - suffix.length)).trimEnd()}${suffix}`;
+}
+
 export function buildParentProgressComment(execution) {
   const followUpNotes =
     execution.workerResult.outcome === "review"
@@ -914,12 +967,12 @@ export function buildParentProgressComment(execution) {
         ]
       : (execution.workerResult.recoveryNotes ?? []);
 
-  return [
+  return limitTrackerCommentBody([
     `${execution.child.identifier} — ${execution.child.title}`,
     "",
     `Status: ${getOutcomeStateLabel(execution.workerResult.outcome)}`,
     "",
-    `Summary: ${execution.workerResult.summary}`,
+    `Summary: ${truncateText(execution.workerResult.summary, MAX_BULLET_ENTRY_CHARS, "summary truncated")}`,
     "",
     "Key changes:",
     formatBulletList(execution.workerResult.changes),
@@ -934,7 +987,7 @@ export function buildParentProgressComment(execution) {
     "",
     "Human testing instructions:",
     formatBulletList(getHumanTestingInstructions(execution.workerResult)),
-  ].join("\n");
+  ].join("\n"));
 }
 
 export function parseIssueTestCommand(issue) {
@@ -994,7 +1047,7 @@ function summarizeChildFromExistingProgressComment(child, commentBody) {
       : (child?.state?.name ?? "Done"),
     summary: summaryLine
       ? summaryLine.replace(/^Summary:\s*/i, "").trim()
-      : "See earlier parent progress comment.",
+      : "See earlier child progress comment.",
     changes: collectSectionBullets(lines, /^Key changes:/i),
     tests: collectSectionBullets(
       lines,
@@ -1035,9 +1088,15 @@ function summarizeChildForFinalComment(
     };
   }
 
-  const matchingComment = (
-    Array.isArray(parentComments) ? parentComments : []
-  ).find((comment) => String(comment?.body ?? "").includes(child.identifier));
+  const childComments = Array.isArray(child?.comments?.nodes)
+    ? child.comments.nodes
+    : [];
+  const comments = childComments.length > 0
+    ? childComments
+    : (Array.isArray(parentComments) ? parentComments : []);
+  const matchingComment = comments.find((comment) =>
+    String(comment?.body ?? "").includes(child.identifier),
+  );
 
   return summarizeChildFromExistingProgressComment(
     child,
@@ -1057,9 +1116,9 @@ function buildHumanQaSummary(completedSummaries) {
   const builtLines = completedSummaries.flatMap((summary) => {
     const changes = Array.isArray(summary.changes) ? summary.changes : [];
     if (changes.length === 0) {
-      return [`${summary.identifier} — ${summary.summary}`];
+      return [`${summary.identifier} — ${truncateText(summary.summary, MAX_BULLET_ENTRY_CHARS, "summary truncated")}`];
     }
-    return changes.map((change) => `${summary.identifier} — ${change}`);
+    return truncateListEntries(changes).map((change) => `${summary.identifier} — ${change}`);
   });
   const verificationLines = [
     ...new Set(
@@ -1107,7 +1166,7 @@ function getCompletedSummaries(queue, completedChildren = []) {
 export function buildFinalTriggerTestingSummary(queue, completedChildren = []) {
   const completedSummaries = getCompletedSummaries(queue, completedChildren);
 
-  return [
+  return limitTrackerCommentBody([
     `Crosby completed ${queue.parent.identifier} — ${queue.parent.title}`,
     "",
     `Parent branch: ${queue.parent.branchName ?? "unknown"}`,
@@ -1131,7 +1190,7 @@ export function buildFinalTriggerTestingSummary(queue, completedChildren = []) {
         : "- No targeted human testing required beyond normal code review.",
       "",
     ]),
-  ].join("\n");
+  ].join("\n"));
 }
 
 export function buildFinalParentSummary(queue, completedChildren = []) {
@@ -1148,7 +1207,7 @@ export function buildFinalParentSummary(queue, completedChildren = []) {
     ),
   ];
 
-  return [
+  return limitTrackerCommentBody([
     `${queue.parent.identifier} — ${queue.parent.title} final summary`,
     "",
     ...buildHumanQaSummary(completedSummaries),
@@ -1156,12 +1215,12 @@ export function buildFinalParentSummary(queue, completedChildren = []) {
     "Completed child outcomes:",
     ...completedSummaries.flatMap((summary) => [
       `- ${summary.identifier} — ${summary.title} (${summary.status})`,
-      `  Summary: ${summary.summary}`,
-      `  Key changes: ${summary.changes.length > 0 ? summary.changes.join("; ") : "See earlier parent progress comment."}`,
-      `  Tests/verifications: ${summary.tests.length > 0 ? summary.tests.join("; ") : "See earlier parent progress comment."}`,
-      `  Follow-up notes: ${summary.followUp.length > 0 ? summary.followUp.join("; ") : "None."}`,
+      `  Summary: ${truncateText(summary.summary, MAX_BULLET_ENTRY_CHARS, "summary truncated")}`,
+      `  Key changes: ${summary.changes.length > 0 ? truncateText(summary.changes.join("; "), MAX_BULLET_ENTRY_CHARS, "changes truncated") : "See earlier child progress comment."}`,
+      `  Tests/verifications: ${summary.tests.length > 0 ? truncateText(summary.tests.join("; "), MAX_BULLET_ENTRY_CHARS, "tests truncated") : "See earlier child progress comment."}`,
+      `  Follow-up notes: ${summary.followUp.length > 0 ? truncateText(summary.followUp.join("; "), MAX_BULLET_ENTRY_CHARS, "follow-up truncated") : "None."}`,
       `  Human testing required: ${formatHumanTestingRequired(Boolean(summary.humanTestingRequired))}`,
-      `  Human testing instructions: ${summary.humanTestingInstructions.length > 0 ? summary.humanTestingInstructions.join("; ") : "No targeted human testing required beyond normal code review."}`,
+      `  Human testing instructions: ${summary.humanTestingInstructions.length > 0 ? truncateText(summary.humanTestingInstructions.join("; "), MAX_BULLET_ENTRY_CHARS, "instructions truncated") : "No targeted human testing required beyond normal code review."}`,
     ]),
     "",
     "Verification rollup:",
@@ -1169,7 +1228,7 @@ export function buildFinalParentSummary(queue, completedChildren = []) {
     "",
     "Follow-up notes / risks:",
     formatBulletList(followUpLines),
-  ].join("\n");
+  ].join("\n"));
 }
 
 export function mergeImplementationSummaryIntoPrBody(
@@ -1230,12 +1289,12 @@ export function buildPullRequestReviewComment(reviewResult) {
         ? "No fixes needed"
         : "Review failed";
 
-  return [
+  return limitTrackerCommentBody([
     "## Claude review",
     "",
     `Outcome: ${outcomeLabel}`,
     "",
-    `Summary: ${reviewResult?.summary ?? "No summary provided."}`,
+    `Summary: ${truncateText(reviewResult?.summary ?? "No summary provided.", MAX_BULLET_ENTRY_CHARS, "summary truncated")}`,
     "",
     "Changes made:",
     formatBulletList(reviewResult?.changes, "- None."),
@@ -1248,7 +1307,7 @@ export function buildPullRequestReviewComment(reviewResult) {
     "",
     "Remaining concerns:",
     formatBulletList(reviewResult?.remainingConcerns, "- None."),
-  ].join("\n");
+  ].join("\n"));
 }
 
 export function buildFinalParentSummaryWithReview(
@@ -1257,16 +1316,16 @@ export function buildFinalParentSummaryWithReview(
   pullRequest,
   reviewResult,
 ) {
-  return [
+  return limitTrackerCommentBody([
     buildFinalParentSummary(queue, completedChildren),
     "",
     "Pull request review:",
     `- PR: ${pullRequest?.url ?? "unknown"}`,
     `- Outcome: ${reviewResult?.outcome ?? "error"}`,
-    `- Summary: ${reviewResult?.summary ?? "No summary provided."}`,
-    `- Commits: ${Array.isArray(reviewResult?.commits) && reviewResult.commits.length > 0 ? reviewResult.commits.join("; ") : "None."}`,
-    `- Remaining concerns: ${Array.isArray(reviewResult?.remainingConcerns) && reviewResult.remainingConcerns.length > 0 ? reviewResult.remainingConcerns.join("; ") : "None."}`,
-  ].join("\n");
+    `- Summary: ${truncateText(reviewResult?.summary ?? "No summary provided.", MAX_BULLET_ENTRY_CHARS, "summary truncated")}`,
+    `- Commits: ${Array.isArray(reviewResult?.commits) && reviewResult.commits.length > 0 ? truncateText(reviewResult.commits.join("; "), MAX_BULLET_ENTRY_CHARS, "commits truncated") : "None."}`,
+    `- Remaining concerns: ${Array.isArray(reviewResult?.remainingConcerns) && reviewResult.remainingConcerns.length > 0 ? truncateText(reviewResult.remainingConcerns.join("; "), MAX_BULLET_ENTRY_CHARS, "concerns truncated") : "None."}`,
+  ].join("\n"));
 }
 
 function parseClaudeReviewWorkerResult(workerResult) {
@@ -1523,20 +1582,20 @@ export async function finalizeParentAfterReview(
   });
 }
 
-async function reportChildOutcomeToParent(queue, execution, addComment) {
+async function reportChildOutcome(queue, execution, addComment) {
   try {
     await addComment(
-      queue.parent.identifier,
+      execution.child.identifier,
       buildParentProgressComment(execution),
     );
   } catch (error) {
     throw new Error(
-      `Failed to post required parent progress comment for ${execution.child.identifier} after finalizing ${getOutcomeStateLabel(execution.workerResult.outcome)}. Recovery: add the parent progress comment on ${queue.parent.identifier}, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to post required child progress comment for ${execution.child.identifier} after finalizing ${getOutcomeStateLabel(execution.workerResult.outcome)}. Recovery: add the progress comment on ${execution.child.identifier}, then rerun /crosby ${queue.parent.identifier}. ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
 
-async function finalizeParentIfComplete(queue, completedChildren, operations) {
+export async function finalizeParentIfComplete(queue, completedChildren, operations) {
   if (!areAllChildrenDone(queue?.children)) return;
 
   if (typeof operations.finalizeParentCompletion === "function") {
@@ -1762,19 +1821,20 @@ function buildNoCommittedWorkReviewResult(workerResult, child, check) {
 }
 
 function buildPostconditionReviewResult(workerResult, child, diagnostic, action) {
+  const limitedDiagnostic = truncateText(diagnostic, MAX_DIAGNOSTIC_CHARS, "diagnostic truncated");
   return {
     ...workerResult,
     outcome: "review",
     summary: `${workerResult.summary} Crosby postcondition failed after the worker returned done; human review is required before this child can be merged or closed.`,
     changes: [
       ...workerResult.changes,
-      `Crosby postcondition failed: ${diagnostic}`,
+      `Crosby postcondition failed: ${limitedDiagnostic}`,
     ],
     requiredHumanAction:
       action ??
       `Review ${child.identifier}: Crosby could not complete post-worker verification or merge. Resolve the diagnostic, then rerun Crosby for the parent issue.`,
     recoveryNotes: [
-      diagnostic,
+      limitedDiagnostic,
       ...(workerResult.recoveryNotes ?? []),
     ],
   };
@@ -2042,8 +2102,11 @@ export async function runSingleChildExecution(queue, operations) {
   }
 
   if (workerResult.outcome === "review") {
+    // Review is scoped to the child. Keep the parent Building while any
+    // child remains unresolved, including HITL work that must be completed
+    // manually. The parent moves to Review only after every child is Done in
+    // finalizeParentIfComplete().
     await operations.moveIssue(child.identifier, "Review");
-    await operations.moveIssue(queue.parent.identifier, "Review");
   }
 
   if (typeof operations.onExecutionFinalized === "function") {
@@ -2141,7 +2204,7 @@ export async function runQueueExecution(initialQueue, operations) {
       };
     }
 
-    await reportChildOutcomeToParent(queue, execution, operations.addComment);
+    await reportChildOutcome(queue, execution, operations.addComment);
 
     if (execution.workerResult.outcome === "review") {
       return {
@@ -2163,6 +2226,160 @@ export async function runQueueExecution(initialQueue, operations) {
       onParentFinalized: operations.onParentFinalized,
     });
   }
+}
+
+export async function resumeChildExecution(queue, childIssueKey, operations) {
+  const child = (queue?.children ?? []).find(
+    (entry) => entry?.identifier === childIssueKey,
+  );
+  if (!child) {
+    throw new Error(
+      `Cannot resume ${childIssueKey}: it is not a direct child of ${queue?.parent?.identifier ?? "the supplied parent"}. Recovery: refresh the parent queue and rerun /crosby resume ${childIssueKey}.`,
+    );
+  }
+
+  const stateName = getStateName(child).toLowerCase();
+  if (stateName !== "review") {
+    throw new Error(
+      `Cannot resume ${childIssueKey} because its current status is '${child?.state?.name ?? "Unknown"}', not Review. Recovery: use /crosby ${queue?.parent?.identifier ?? "PARENT-ISSUE"} for normal queue execution.`,
+    );
+  }
+
+  const topLevelChild = child;
+  const routingTarget = getExecutionRoutingTarget(queue, topLevelChild);
+  const routing = routingTarget
+    ? resolveIssueWorkingDirectory(routingTarget, operations.routing)
+    : null;
+
+  if (typeof operations.assertBranchCleanupPreflight === "function") {
+    await operations.assertBranchCleanupPreflight({
+      parent: queue.parent,
+      child,
+      topLevelChild,
+      path: [child],
+      cwd: routing?.cwd,
+    });
+  }
+
+  if (typeof operations.ensureParentBranch === "function") {
+    await operations.ensureParentBranch({
+      parent: queue.parent,
+      child,
+      topLevelChild,
+      cwd: routing?.cwd,
+    });
+  }
+
+  const childBranch =
+    typeof operations.prepareChildBranch === "function"
+      ? await operations.prepareChildBranch({
+          parent: queue.parent,
+          child,
+          topLevelChild,
+          path: [child],
+          cwd: routing?.cwd,
+        })
+      : null;
+
+  if (!childBranch) {
+    throw new Error(
+      `Cannot resume ${childIssueKey} because Crosby could not prepare its child branch. Recovery: rerun /crosby resume ${childIssueKey} after the parent branch is available.`,
+    );
+  }
+
+  if (typeof operations.hasCommittedWorkSince === "function") {
+    const check = await operations.hasCommittedWorkSince({
+      cwd: routing?.cwd,
+      before: {
+        available: true,
+        branch: childBranch.parentBranch,
+        head: childBranch.parentHead,
+      },
+      parent: queue.parent,
+      expectedBranchName: childBranch.name,
+    });
+    if (!check?.hasCommittedWork) {
+      throw new Error(
+        `Cannot resume ${childIssueKey} because its child branch has no qualifying commit beyond the parent branch. Recovery: commit the manual work on ${childBranch.name}, verify git status --porcelain is clean, then rerun /crosby resume ${childIssueKey}. ${check?.diagnostic ?? ""}`.trim(),
+      );
+    }
+  }
+
+  await operations.moveIssue(queue.parent.identifier, "Building");
+  await operations.moveIssue(child.identifier, "Building");
+
+  const testCommand = parseIssueTestCommand(child);
+  try {
+    if (testCommand && typeof operations.runVerificationCommand === "function") {
+      await operations.runVerificationCommand({
+        parent: queue.parent,
+        child,
+        topLevelChild,
+        path: [child],
+        cwd: routing?.cwd,
+        command: testCommand,
+      });
+    }
+
+    if (typeof operations.mergeChildBranchIntoParent === "function") {
+      await operations.mergeChildBranchIntoParent({
+        parent: queue.parent,
+        child,
+        topLevelChild,
+        path: [child],
+        childBranch,
+        cwd: routing?.cwd,
+      });
+    }
+  } catch (error) {
+    await operations.moveIssue(child.identifier, "Review").catch(() => {});
+    throw error;
+  }
+
+  await operations.moveIssue(child.identifier, "Done");
+
+  const manualResult = {
+    outcome: "done",
+    summary: `Manual handoff for ${child.identifier} was validated, tested, and merged by Crosby.`,
+    changes: [`Merged ${childBranch.name} into ${childBranch.parentBranch}.`],
+    tests: testCommand ? [testCommand] : ["No issue Test Command was defined."],
+    humanTestingRequired: false,
+    humanTestingInstructions: [
+      "No targeted human testing required beyond normal code review.",
+    ],
+    recoveryNotes: [],
+  };
+  const execution = {
+    child,
+    topLevelChild,
+    path: [child],
+    childBranch,
+    workerResult: manualResult,
+  };
+
+  await operations.addComment(
+    child.identifier,
+    buildParentProgressComment(execution),
+  );
+
+  const refreshedQueue = await operations.refreshQueue(queue.parent.identifier);
+  if (typeof operations.onQueueRefreshed === "function") {
+    await operations.onQueueRefreshed(refreshedQueue);
+  }
+
+  await finalizeParentIfComplete(refreshedQueue, [execution], operations);
+
+  if (classifyChildIssues(refreshedQueue?.children ?? []).runnable.length > 0) {
+    return {
+      resumedChild: child,
+      continued: await runQueueExecution(refreshedQueue, operations),
+    };
+  }
+
+  return {
+    resumedChild: child,
+    continued: null,
+  };
 }
 
 function defaultSleep(ms) {
@@ -2264,7 +2481,7 @@ export async function runWatchCycle(operations) {
       };
     }
 
-    await reportChildOutcomeToParent(queue, execution, operations.addComment);
+    await reportChildOutcome(queue, execution, operations.addComment);
     if (execution.workerResult.outcome === "review") {
       return {
         status: "processed",
