@@ -4,6 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createJiraTrackerAdapter } from "./jira.mjs";
 import {
   createCrosbyDashboard,
   markDashboardExecutionFinalized,
@@ -29,6 +30,7 @@ import {
   publishParentPullRequest,
   reviewParentPullRequest,
   runQueueExecution,
+  resumeChildExecution,
   runWatchMode,
 } from "./lib-v2.mjs";
 
@@ -569,6 +571,58 @@ async function addIssueComment(
   }
 }
 
+type CrosbyTrackerAdapter = {
+  kind: "github" | "jira";
+  fetchParentQueue: (issueRef: string) => Promise<any>;
+  loadIssue: (issueRef: string) => Promise<any>;
+  moveIssue: (issueRef: string, state: string) => Promise<void>;
+  addComment: (issueRef: string, body: string) => Promise<void>;
+};
+
+function createGitHubTrackerAdapter(pi: ExtensionAPI): CrosbyTrackerAdapter {
+  return {
+    kind: "github",
+    fetchParentQueue: (issueRef) =>
+      fetchParentQueue(issueRef, (key) => loadIssueFromGitHub(pi, key)),
+    loadIssue: (issueRef) => loadIssueFromGitHub(pi, issueRef),
+    moveIssue: (issueRef, state) => moveIssue(pi, issueRef, state),
+    addComment: (issueRef, body) => addIssueComment(pi, issueRef, body),
+  };
+}
+
+const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
+const JIRA_BROWSE_URL_PATTERN =
+  /^https?:\/\/[^\s/]+\.atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)(?:[/?#].*)?$/i;
+
+function extractJiraIssueKey(issueRef: string) {
+  const raw = String(issueRef ?? "").trim();
+  if (JIRA_ISSUE_KEY_PATTERN.test(raw)) return raw;
+
+  const browseUrlMatch = raw.match(JIRA_BROWSE_URL_PATTERN);
+  return browseUrlMatch ? browseUrlMatch[1].toUpperCase() : null;
+}
+
+function selectTrackerAdapter(
+  pi: ExtensionAPI,
+  issueRef: string,
+): {
+  tracker: "github" | "jira";
+  issueKey: string;
+  adapter: CrosbyTrackerAdapter;
+} {
+  const jiraIssueKey = extractJiraIssueKey(issueRef);
+  const tracker = jiraIssueKey ? "jira" : "github";
+
+  return {
+    tracker,
+    issueKey: jiraIssueKey ?? String(issueRef ?? "").trim(),
+    adapter:
+      tracker === "jira"
+        ? createJiraTrackerAdapter()
+        : createGitHubTrackerAdapter(pi),
+  };
+}
+
 async function getPullRequestForBranch(
   pi: ExtensionAPI,
   branchName: string | undefined,
@@ -772,6 +826,23 @@ async function hasRemoteGitBranch(
   return result.stdout.trim().length > 0;
 }
 
+async function gitRevisionExists(
+  pi: ExtensionAPI,
+  cwd: string,
+  revision: string,
+) {
+  const trimmedRevision = String(revision ?? "").trim();
+  if (!trimmedRevision) return false;
+
+  const invocation = getGitInvocation([
+    "rev-parse",
+    "--verify",
+    `${trimmedRevision}^{commit}`,
+  ]);
+  const result = await pi.exec(invocation.command, invocation.args, { cwd });
+  return result.code === 0;
+}
+
 async function hasUncommittedGitChanges(pi: ExtensionAPI, cwd: string) {
   const result = await execGit(pi, ["status", "--short"], cwd);
   return result.stdout.trim().length > 0;
@@ -839,9 +910,43 @@ async function loadLocalBranchCleanupFacts(
   );
 }
 
+function getParentIssueNumber(parent: any) {
+  const raw = String(parent?.identifier ?? parent?.number ?? "").trim();
+  const match = raw.match(/\d+/);
+  return match ? match[0] : null;
+}
+
+function isAllowedCrosbyRunBranch(branch: any, parent: any) {
+  const branchName = String(branch?.name ?? "").trim();
+  const parentBranchName = String(parent?.branchName ?? "").trim();
+
+  if (branchName === "main") return true;
+  if (parentBranchName && branchName === parentBranchName) return true;
+
+  const parentNumber = getParentIssueNumber(parent);
+  if (
+    parentNumber &&
+    branch?.current === true &&
+    branchName.startsWith(`crosby/${parentNumber}/`)
+  ) {
+    return true;
+  }
+
+  if (
+    parentNumber &&
+    branch?.merged === true &&
+    branchName.startsWith(`crosby/${parentNumber}/`)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 async function assertBranchCleanupPreflight(
   pi: ExtensionAPI,
   cwd: string | undefined,
+  context: { parent?: any } = {},
 ) {
   if (!cwd) {
     throw new Error(
@@ -849,8 +954,16 @@ async function assertBranchCleanupPreflight(
     );
   }
 
-  const branches = await loadLocalBranchCleanupFacts(pi, cwd, "main");
-  assertNoLocalBranchCleanupRequired(branches, { baseBranch: "main" });
+  const parentBranchName = String(context.parent?.branchName ?? "").trim();
+  const requestedBaseBranch = parentBranchName || "main";
+  const baseBranch = (await gitRevisionExists(pi, cwd, requestedBaseBranch))
+    ? requestedBaseBranch
+    : "main";
+  const branches = await loadLocalBranchCleanupFacts(pi, cwd, baseBranch);
+  const blockingBranches = branches.filter(
+    (branch) => !isAllowedCrosbyRunBranch(branch, context.parent),
+  );
+  assertNoLocalBranchCleanupRequired(blockingBranches, { baseBranch });
 }
 
 async function getGitRevision(pi: ExtensionAPI, cwd: string, revision: string) {
@@ -1148,7 +1261,7 @@ async function ensureParentBranch(
 
   if (!branchName) {
     throw new Error(
-      `Parent issue ${issueKey} is missing a branch name. Recovery: add a Branch: line or branch:<name> label to the parent GitHub issue, then rerun /crosby ${issueKey}.`,
+      `Parent issue ${issueKey} is missing a branch name. Recovery: add a Branch: line or branch:<name> label to the parent issue, then rerun /crosby ${issueKey}.`,
     );
   }
 
@@ -1828,7 +1941,7 @@ async function runIsolatedWorkerInHerdrPane(
 export default function crosbyExtension(pi: ExtensionAPI) {
   pi.registerCommand("crosby", {
     description:
-      "Execute parent child-work, watch Execute parents, or explicitly push/review a parent PR",
+      "Execute parent child-work, resume a reviewed child, watch Execute parents, or explicitly push/review a parent PR",
     handler: async (args, ctx) => {
       let dashboardController: ReturnType<
         typeof createCrosbyDashboardController
@@ -1860,8 +1973,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
                 }),
               ensureParentBranch: ({ parent, cwd }) =>
                 ensureParentBranch(pi, parent, cwd),
-              assertBranchCleanupPreflight: ({ cwd }) =>
-                assertBranchCleanupPreflight(pi, cwd),
+              assertBranchCleanupPreflight: ({ parent, cwd }) =>
+                assertBranchCleanupPreflight(pi, cwd, { parent }),
               prepareChildBranch: ({ parent, child, cwd }) =>
                 prepareChildBranch(pi, parent, child, cwd),
               snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
@@ -1974,10 +2087,73 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           return;
         }
 
-        const issueKey = command.issueKey;
-        const queue = await fetchParentQueue(issueKey, (key) =>
-          loadIssueFromGitHub(pi, key),
-        );
+        const trackerSelection = selectTrackerAdapter(pi, command.issueKey);
+        const { issueKey, adapter: trackerAdapter } = trackerSelection;
+        if (
+          !["parent", "resume"].includes(command.mode) &&
+          trackerSelection.tracker !== "github"
+        ) {
+          throw new Error(
+            `Crosby ${command.mode} remains GitHub-only in v1. Recovery: use a GitHub issue reference for ${command.mode}, or run manual Jira execution with /crosby ${issueKey}.`,
+          );
+        }
+
+        if (command.mode === "resume") {
+          const childIssue = await trackerAdapter.loadIssue(issueKey);
+          const parentKey = childIssue?.parent?.identifier;
+          if (!parentKey) {
+            throw new Error(
+              `Cannot resume ${issueKey} because it has no parent issue. Recovery: run /crosby resume with a child issue that belongs to a Crosby parent queue.`,
+            );
+          }
+
+          const queue = await trackerAdapter.fetchParentQueue(parentKey);
+          dashboardController = createCrosbyDashboardController(ctx, queue, "manual");
+          await openCrosbyDashboardPane(pi, dashboardController);
+
+          const execution = await resumeChildExecution(queue, issueKey, {
+            moveIssue: (targetIssueKey, state) =>
+              trackerAdapter.moveIssue(targetIssueKey, state),
+            addComment: (targetIssueKey, body) =>
+              trackerAdapter.addComment(targetIssueKey, body),
+            runWorker: ({ prompt, cwd, model, effort, childIssueKey }) =>
+              runIsolatedWorker(pi, prompt, {
+                cwd,
+                model,
+                effort,
+                issueKey: childIssueKey,
+                onHerdrWorkerStarted: (event) =>
+                  dashboardController?.herdrWorkerStarted(event),
+              }),
+            ensureParentBranch: ({ parent, cwd }) =>
+              ensureParentBranch(pi, parent, cwd),
+            assertBranchCleanupPreflight: ({ parent, cwd }) =>
+              assertBranchCleanupPreflight(pi, cwd, { parent }),
+            prepareChildBranch: ({ parent, child, cwd }) =>
+              prepareChildBranch(pi, parent, child, cwd),
+            snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
+            hasCommittedWorkSince: ({ cwd, before, parent, expectedBranchName }) =>
+              hasCommittedWorkSince(pi, cwd, before, parent, expectedBranchName),
+            runVerificationCommand: ({ cwd, command }) =>
+              runVerificationCommand(pi, cwd, command),
+            mergeChildBranchIntoParent: ({ parent, child, childBranch, cwd }) =>
+              mergeChildBranchIntoParent(pi, parent, child, childBranch, cwd),
+            refreshQueue: (parentIssueKey) =>
+              trackerAdapter.fetchParentQueue(parentIssueKey),
+            loadIssue: (targetIssueKey) => trackerAdapter.loadIssue(targetIssueKey),
+            onQueueRefreshed: (refreshedQueue) =>
+              dashboardController?.queueRefreshed(refreshedQueue),
+            routing: undefined,
+          });
+
+          ctx.ui.notify(
+            `Resumed ${issueKey} through Crosby for parent ${parentKey}.`,
+            "success",
+          );
+          return execution;
+        }
+
+        const queue = await trackerAdapter.fetchParentQueue(issueKey);
 
         if (command.mode === "push") {
           const pullRequest = await publishParentPullRequest(queue, [], {
@@ -2045,9 +2221,9 @@ export default function crosbyExtension(pi: ExtensionAPI) {
 
         const execution = await runQueueExecution(queue, {
           moveIssue: (targetIssueKey, state) =>
-            moveIssue(pi, targetIssueKey, state),
+            trackerAdapter.moveIssue(targetIssueKey, state),
           addComment: (targetIssueKey, body) =>
-            addIssueComment(pi, targetIssueKey, body),
+            trackerAdapter.addComment(targetIssueKey, body),
           runWorker: ({ prompt, cwd, model, effort, childIssueKey }) =>
             runIsolatedWorker(pi, prompt, {
               cwd,
@@ -2059,8 +2235,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
             }),
           ensureParentBranch: ({ parent, cwd }) =>
             ensureParentBranch(pi, parent, cwd),
-          assertBranchCleanupPreflight: ({ cwd }) =>
-            assertBranchCleanupPreflight(pi, cwd),
+          assertBranchCleanupPreflight: ({ parent, cwd }) =>
+            assertBranchCleanupPreflight(pi, cwd, { parent }),
           prepareChildBranch: ({ parent, child, cwd }) =>
             prepareChildBranch(pi, parent, child, cwd),
           snapshotGitState: ({ cwd }) => snapshotGitState(pi, cwd),
@@ -2071,10 +2247,8 @@ export default function crosbyExtension(pi: ExtensionAPI) {
           mergeChildBranchIntoParent: ({ parent, child, childBranch, cwd }) =>
             mergeChildBranchIntoParent(pi, parent, child, childBranch, cwd),
           refreshQueue: (parentIssueKey) =>
-            fetchParentQueue(parentIssueKey, (key) =>
-              loadIssueFromGitHub(pi, key),
-            ),
-          loadIssue: (issueKey) => loadIssueFromGitHub(pi, issueKey),
+            trackerAdapter.fetchParentQueue(parentIssueKey),
+          loadIssue: (issueKey) => trackerAdapter.loadIssue(issueKey),
           onExecutionStart: (event) => {
             dashboardController?.executionStarted(event);
             const pathText = formatIssuePath(event.path);

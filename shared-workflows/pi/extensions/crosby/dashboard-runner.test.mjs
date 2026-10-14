@@ -121,7 +121,7 @@ test("renderDashboardFromEventsPath uses dashboard.mjs's renderCrosbyDashboard a
   const lines = renderDashboardFromEventsPath(eventsPath);
 
   assert.match(lines.join("\n"), /Crosby #129: Parent feature/);
-  assert.match(lines.join("\n"), /☐ #130 First task/);
+  assert.match(lines.join("\n"), /⏳ #130 First task/);
 });
 
 test("renderDashboardFromEventsPath reports missing state without throwing", () => {
@@ -209,23 +209,38 @@ test("CLI watch mode stays alive and reprints on appended events instead of exit
     stdout += chunk.toString();
   });
 
-  // Give the CLI process time to render once, then confirm it has not
-  // exited on its own (regression: an unref'd interval timer let the
-  // process exit immediately after the first render, so the dashboard
-  // pane never reflected later run updates).
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(child.exitCode, null, "CLI watch process should still be running");
+  const waitForStdout = async (predicate, timeoutMs = 2000) => {
+    const startedAt = Date.now();
+    while (!predicate(stdout)) {
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error(`Timed out waiting for dashboard output: ${stdout}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
 
-  dashboard.currentIssueKey = "#130";
-  dashboard.updatedAt = "2026-08-02T00:00:01.000Z";
-  fs.appendFileSync(eventsPath, `${JSON.stringify(dashboard)}\n`);
+  try {
+    // Wait for the initial render rather than assuming process startup and
+    // pipe delivery complete within a fixed interval. The old fixed delay
+    // made this test race under load and report an empty stdout buffer even
+    // though the dashboard process was healthy.
+    await waitForStdout((value) => value.includes("Crosby #129"));
+    assert.equal(child.exitCode, null, "CLI watch process should still be running");
 
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  child.kill();
+    dashboard.currentIssueKey = "#130";
+    dashboard.updatedAt = "2026-08-02T00:00:01.000Z";
+    fs.appendFileSync(eventsPath, `${JSON.stringify(dashboard)}\n`);
 
-  const renders = stdout.split("Crosby #129").filter((chunk) => chunk.trim().length > 0);
+    await waitForStdout(
+      (value) => value.split("Crosby #129").length - 1 >= 2,
+    );
+  } finally {
+    child.kill();
+  }
+
+  const renders = stdout.split("Crosby #129").length - 1;
   assert.ok(
-    renders.length >= 2,
-    `expected the CLI to reprint after the appended event, got ${renders.length} render(s): ${stdout}`,
+    renders >= 2,
+    `expected the CLI to reprint after the appended event, got ${renders} render(s): ${stdout}`,
   );
 });

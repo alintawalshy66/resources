@@ -30,6 +30,30 @@ function readEventLines(eventsPath) {
     .map((line) => JSON.parse(line));
 }
 
+test("Crosby dashboard renders the blocked pause icon in orange", () => {
+  const dashboard = createCrosbyDashboard(
+    {
+      parent: { identifier: "#129", title: "Parent feature" },
+      children: [
+        {
+          identifier: "#130",
+          title: "Blocked task",
+          state: { name: "Ready to Build", type: "unstarted" },
+          relations: {
+            blockedBy: [{ state: { name: "Building" } }],
+          },
+        },
+      ],
+    },
+    { mode: "manual", runId: "test-run", now: () => "2026-08-02T00:00:00.000Z" },
+  );
+
+  assert.match(
+    renderCrosbyDashboard(dashboard).join("\n"),
+    /\x1b\[38;5;208m⏸︎\x1b\[39m #130 Blocked task/,
+  );
+});
+
 test("Crosby dashboard renders loaded, in-progress, worker, and finalized task states", () => {
   const dashboard = createCrosbyDashboard(
     {
@@ -51,7 +75,7 @@ test("Crosby dashboard renders loaded, in-progress, worker, and finalized task s
   );
 
   assert.match(renderCrosbyDashboard(dashboard).join("\n"), /1\/2 done/);
-  assert.match(renderCrosbyDashboard(dashboard).join("\n"), /☐ #130 First task/);
+  assert.match(renderCrosbyDashboard(dashboard).join("\n"), /⏳ #130 First task/);
   assert.match(renderCrosbyDashboard(dashboard).join("\n"), /✅ #131 Already done/);
 
   markDashboardExecutionStarted(dashboard, {
@@ -123,7 +147,7 @@ test("Crosby dashboard reconciles refreshed GitHub queue while keeping discovere
 
   const rendered = renderCrosbyDashboard(dashboard).join("\n");
   assert.match(rendered, /👀 #130 First task renamed — pane pane-123/);
-  assert.match(rendered, /☐ #131 Newly discovered task/);
+  assert.match(rendered, /⏳ #131 Newly discovered task/);
 });
 
 test("Crosby dashboard reconciles stale worker state after manual GitHub intervention", () => {
@@ -222,8 +246,8 @@ test("Crosby dashboard prioritizes unfinished work and only recent completed wor
   const rendered = renderCrosbyDashboard(dashboard).join("\n");
   assert.match(rendered, /Progress: 10\/18 done, 8 left/);
   assert.match(rendered, /Latest completed:/);
-  assert.match(rendered, /Left to complete \(8\):\n☐ #140 Remaining task 10/);
-  assert.match(rendered, /☐ #147 Remaining task 17/);
+  assert.match(rendered, /Left to complete \(8\):\n⏳ #140 Remaining task 10/);
+  assert.match(rendered, /⏳ #147 Remaining task 17/);
   assert.match(rendered, /✅ #139 Completed task 9/);
   assert.doesNotMatch(rendered, /✅ #130 Completed task 0/);
 });

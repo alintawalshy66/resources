@@ -1,6 +1,6 @@
 # Crosby
 
-Crosby is the GitHub Issues execution orchestrator for this workflow.
+Crosby is the issue execution orchestrator for this workflow. It supports GitHub Issues as the default tracker and Jira issues when Jira credentials are configured.
 
 ## Quick start
 
@@ -41,6 +41,7 @@ Crosby supports four commands:
 - **`/crosby --watch`**: poll GitHub and automatically process active parents
 - **`/crosby push #129`**: push the parent branch and create/update a PR
 - **`/crosby review #129`**: run automated review against the parent PR
+- **`/crosby resume WCSD-218`**: resume a reviewed child after manual recovery, validate and merge its existing branch, move it to `Done`, and continue its parent queue
 
 It uses:
 
@@ -97,7 +98,7 @@ The parent should have:
 - `status:ready` or `status:execute`
 - a work-type label such as `development`
 - a local folder routing label, such as `dlhub`, when Crosby must choose a checkout
-- an optional `Branch: branch-name` line or `branch:<name>` label; otherwise Crosby derives a branch name from the issue number/title
+- an optional `Branch: branch-name` line or `branch:<name>` label; otherwise Crosby derives a branch name from the issue number/key and title/summary
 - a milestone shared with its children, when useful
 
 ## Child issue format
@@ -143,14 +144,24 @@ What happens:
 3. Picks the next unblocked child with `status:ready-to-build`.
 4. Ensures the repo is on the parent feature branch.
 5. Moves that child to `status:building`.
-6. Runs the Pi worker with a persistent session named from the child issue number (for example `gh-135`) so it is easy to find later with `pi -r` / `/resume`. The worker prompt requires leaf workers to `git add`, `git commit` with a message referencing the issue key, verify `git status --porcelain` is empty before returning `done`, include commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` if they cannot satisfy that commit protocol.
+6. Runs the Pi worker with a persistent tracker-specific session name (`gh-135` for GitHub issues, `jira-WCSD-127` for Jira issues) so it is easy to find later with `pi -r` / `/resume`. GitHub worker prompts tell workers to refresh with `gh issue view`; Jira worker prompts tell workers to refresh with Crosby's read-only Jira view helper and not to mutate Jira labels or statuses directly. The worker prompt requires leaf workers to `git add`, `git commit` with a message referencing the assigned issue key, verify `git status --porcelain` is empty before returning `done`, include commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` if they cannot satisfy that commit protocol.
 7. Validates the worker result against git state:
    - Crosby snapshots `HEAD` on the parent branch before launching the worker
    - `outcome: "done"` closes the child only if a new descendant commit exists on the parent branch after the worker finishes
-   - if no qualifying commit is found, Crosby downgrades the result to `status:review` with a diagnostic and human-action recovery note
-   - `outcome: "review"` still moves directly to `status:review`
-8. Posts a progress comment to the parent.
+   - if no qualifying commit is found, Crosby downgrades the child result to `status:review` with a diagnostic and human-action recovery note
+   - `outcome: "review"` moves the child to `status:review` while the parent remains active for unresolved work; the parent moves to `status:review` only after every child is done
+8. Posts the completed child progress comment to the child issue.
 9. If all children are closed, Crosby posts the final parent summary and moves the parent to `status:review`.
+
+### Resume a reviewed child
+
+When a worker or human completes manual recovery work on a child that is in `Review`:
+
+```text
+/crosby resume WCSD-218
+```
+
+Crosby resolves the parent from the child, validates the existing child branch and commit, reruns the child `## Test Command`, fast-forward merges the branch into the parent, moves the child to `Done`, posts the child progress comment, and continues the parent queue. The worker must not change Jira status directly.
 
 ### Watch mode
 
@@ -167,11 +178,59 @@ Current behavior:
 - ensures the repo is on the parent feature branch
 - moves that child to `status:building`
 - snapshots the current git branch and `HEAD`
-- runs the Pi worker with a persistent `gh-<issue-number>` session name for resume lookup
-- instructs the worker to stage and commit its work, reference the issue key in the commit message, verify `git status --porcelain` is empty before `done`, report commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` when it cannot commit cleanly
-- closes `done` children only when worker execution produced a new descendant commit on the parent branch; otherwise moves the child to `status:review` with a clear no-commit diagnostic
-- posts progress back to the parent
+- runs the Pi worker with a persistent tracker-specific session name (`gh-<issue-number>` for GitHub, `jira-<ISSUE-KEY>` for Jira) for resume lookup
+- instructs the worker with tracker-aware refresh guidance: GitHub workers use `gh issue view`, while Jira workers use Crosby's read-only Jira view helper and must not mutate Jira labels or statuses directly
+- instructs the worker to stage and commit its work, reference the assigned issue key in the commit message, verify `git status --porcelain` is empty before `done`, report commit hash(es) in `changes[]`, and return `review` with `requiredHumanAction` when it cannot commit cleanly
+- closes `done` children only when worker execution produced a new descendant commit on the parent branch; otherwise moves the child to `status:review` with a clear no-commit diagnostic while leaving the parent active for remaining work
+- posts each child outcome/progress comment back to that child issue
 - when all child issues are closed, posts the final summary and moves the parent to `status:review`
+
+## Jira status and metadata
+
+Jira execution is started explicitly with the Story key, for example `/crosby WCSD-189`; Jira watch mode is not part of this workflow. Jira workflow state is stored in Jira's native status field. Crosby does not create, read, or update Jira `status-*` labels.
+
+For the WCSD Story → Sub-task workflow, Crosby uses:
+
+- `Backlog` — unactivated Story/container or HITL work awaiting attention
+- `Ready to build` — runnable AFK/buildable Sub-task
+- `Building` — issue currently being worked by Crosby
+- `Review` — human review or recovery is required
+- `Done` — work is complete
+
+Crosby changes Jira status through Jira transitions, then reloads the issue to verify the destination status. It does not update the status field with a normal issue `PUT`.
+
+Crosby also reads native Jira `Blocks` links. If issue A blocks issue B, B is held until A reaches `Done`; create the relationship with A as the outward issue and B as the inward issue.
+
+Jira issue type and parent relationships are native Jira data. A Story container with Sub-tasks does not need `type-parent` or `type-child` labels.
+
+The Jira model component is the primary and authoritative model-routing source for new Jira work. Crosby maps approved WCSD components as follows:
+
+- `OpenAI GPT-5.5` → `github-copilot/gpt-5.5`
+- `OpenAI GPT-5.6 Luna` → `github-copilot/gpt-5.6-luna`
+- `OpenAI GPT-5.6 Sol` → `github-copilot/gpt-5.6-sol`
+- `Anthropic Claude Opus 4.7` → `github-copilot/claude-opus-4.7`
+- `Anthropic Claude Opus 5` → `github-copilot/claude-opus-5`
+
+Create Jira AFK/buildable issues with exactly one recognized model component. Do not add `model-*` labels to new Jira issues. If no recognized model component is present, Crosby may fall back to a legacy `model-*` Jira label for older issues only. Multiple recognized model components are rejected as ambiguous.
+
+The following Jira-safe labels remain metadata used by Crosby:
+
+- `mode-afk`, `mode-hitl`
+- `wt-development`, `wt-process-automation`
+- `effort-off`, `effort-minimal`, `effort-low`, `effort-medium`, `effort-high`, `effort-xhigh`, `effort-max`
+- local checkout routing labels such as `dlhub`
+
+For Jira parent/container issues, `Branch: branch-name` in the description is optional: if omitted, Crosby derives a feature branch from the Jira issue key and summary, such as `issue-wcsd-137-build-jira-crosby-queue`.
+
+## Jira read-only view helper
+
+Jira workers should refresh assigned Jira issue context with Crosby's read-only helper instead of GitHub CLI issue viewing:
+
+```bash
+node shared-workflows/pi/extensions/crosby/jira-view.mjs WCSD-127
+```
+
+The helper loads the Jira issue through the Crosby Jira REST adapter and prints JSON containing the issue key, title, body/description, metadata labels/state, native tracker status, parent, and direct children. It performs only read requests; Crosby itself owns Jira status transitions and comments during queue execution.
 
 ## Branch cleanup preflight report
 
@@ -186,34 +245,35 @@ The branch cleanup report explains which branch state must be reviewed before th
 
 ## Workflow states
 
-### Parent issue labels
+### Jira Story/container status
 
-- `status:ready`
-  - inactive
-  - watcher ignores it
-- `status:execute`
-  - active
-  - watcher will inspect this parent and try to run child work
-- `status:review`
-  - all child work is complete and ready for human QA / explicit push / explicit review
-- closed
-  - fully finished
+- `Backlog` or `Ready to build`
+  - not yet being executed
+- `Building`
+  - Crosby is executing one or more Sub-tasks
+- `Review`
+  - all Sub-tasks are complete, or human action is required
+- `Done`
+  - human acceptance has completed the Story
 
-### Child issue labels/state
+### Jira Sub-task status
 
-- `status:ready-to-build`
-  - runnable state for buildable child issues
-- `status:building`
+- `Ready to build`
+  - runnable AFK/buildable work
+- `Building`
   - currently being worked by Crosby
-- `status:review`
+- `Review`
   - implementation finished but human review/action is required
-- closed
+- `Done`
   - complete
 
-## Intended issue creation defaults
+## Intended Jira issue creation defaults
 
-- `mode:afk` child issues -> `status:ready-to-build`
-- `mode:hitl` child issues -> `status:ready` or `status:review`
+- Story/container: `Backlog`
+- AFK/buildable Sub-task: `Ready to build`
+- HITL Sub-task: `Backlog`
+
+Jira creation may require creating the issue first, transitioning it to the intended initial status, and then reloading it to verify the status.
 
 ## Push/review behavior
 
@@ -272,6 +332,17 @@ and an optional full dashboard pane opened in Herdr.
   same `renderCrosbyDashboard` reducer that produces the pane content. Because it is a
   plain Node process, it never starts a Pi model or session and keeps running/tailing
   even if the Crosby control tab's Pi process exits.
+
+Dashboard task icons:
+
+- `⏳` queued
+- `…` not ready
+- `⏸︎` blocked (orange)
+- `🔄` in progress
+- `⌛` finishing
+- `✅` done
+- `👀` review
+- `❌` fatal
 
 ### Herdr dashboard pane behavior
 
@@ -348,6 +419,7 @@ Optional environment variables:
 - `CROSBY_HERDR_PANES=0` disables automatic Herdr worker terminals when Crosby is running inside Herdr
 - `CROSBY_HERDR_LAYOUT=tab|pane` chooses worker display layout when running inside Herdr; default is `tab`
 - `CROSBY_DASHBOARD_PANE=0` disables the automatic Herdr dashboard pane; the dashboard pane is otherwise opened by default whenever Crosby is running inside Herdr, and never opened outside Herdr
+- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_VERIFY_SSL`, and `JIRA_CA_BUNDLE` configure the Jira REST adapter; values may also be read from `/home/walsc0/projects/dlhub/backend/.env` when missing from the environment
 - `GH_BIN`
 - `GIT_BIN`
 - `CLAUDE_BIN`
@@ -365,6 +437,8 @@ Defaults:
 
 - `index.ts` - Pi extension entrypoint and GitHub CLI adapter
 - `lib-v2.mjs` - Crosby queue/execution logic
+- `jira.mjs` - Crosby-owned Jira REST adapter, issue loading, direct children loading, native status transitions, Jira model-component routing, and metadata label normalization
+- `jira-view.mjs` - read-only Jira issue view helper for worker prompt refreshes
 - `lib-v2.test.mjs` - Node test coverage
 - `dashboard.mjs` - dashboard/compact widget state model, event persistence, and rendering
 - `dashboard.test.mjs` - Node test coverage for the dashboard model
