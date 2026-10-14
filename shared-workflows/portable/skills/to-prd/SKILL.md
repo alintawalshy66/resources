@@ -75,6 +75,20 @@ Synthesize the current context into a focused PRD that a developer or agent can 
 - For Jira Crosby execution, every container must have child work:
   - Epic containers need one or more Stories.
   - Story/Bug/Task containers need one or more Sub-tasks.
+- When noting labels for downstream Jira issue creation, use Jira-safe hyphenated Crosby metadata labels, not GitHub-only colon/slash labels:
+  - mode: `mode-afk` or `mode-hitl`
+  - work type: `wt-development` or `wt-process-automation`
+  - effort: `effort-off`, `effort-minimal`, `effort-low`, `effort-medium`, `effort-high`, `effort-xhigh`, or `effort-max`
+  - local checkout routing label, e.g. `dlhub`
+- Do not use Jira labels for workflow status, issue hierarchy, or model routing. Jira workflow status uses native Jira status values; issue type and parent/child relationships use native Jira fields; model routing uses native Jira Components.
+- Jira model components are the model-routing source:
+  - normal backend/API/data work → `OpenAI GPT-5.5`
+  - high-effort backend work → `OpenAI GPT-5.6 Luna` with `effort-high`
+  - higher-risk backend work → `OpenAI GPT-5.6 Sol` with `effort-medium` or lower; never above `effort-medium` unless explicitly agreed in the conversation
+  - frontend/UI work → an Anthropic Claude Opus component, normally `Anthropic Claude Opus 4.7`
+- Keep Anthropic routing within the Claude Opus family; do not select Claude Sonnet or Haiku components for planned work.
+- Do not add model compatibility labels such as `model-github-copilot-gpt-5.5` to new Jira issues. Those labels are legacy fallback only; new Jira work should have exactly one recognized model component when AFK/buildable.
+- Include a `Branch: branch-name` note only when a specific branch is required; otherwise Crosby derives the Jira parent/container feature branch from the Jira issue key and summary.
 
 ## Output Format
 
@@ -97,6 +111,8 @@ When Jira is selected or inferred, add this section near the top of the PRD:
 - Container Issue Type: Epic | Story | Bug | Task
 - Crosby Execution: yes | no
 - Child Work Type: Story | Sub-task
+- Model Family Policy: OpenAI for backend/data/infrastructure; Anthropic Claude Opus for frontend/UI
+- Model Component Policy: OpenAI GPT-5.5 normally; GPT-5.6 Luna for high-effort work; GPT-5.6 Sol for higher-risk work capped at medium effort unless explicitly agreed; Claude Opus for frontend/UI
 ```
 
 Do not add Jira execution metadata for tracker-neutral or existing GitHub Issues flows unless explicitly requested.
@@ -110,6 +126,8 @@ Do not add Jira execution metadata for tracker-neutral or existing GitHub Issues
 - Would another tool or person understand what comes next?
 - If Jira is selected, does the PRD include Jira execution metadata with a clear container type and child work type?
 - If Jira Crosby execution is `yes`, will the selected container type produce child work for Crosby to execute?
+- If Jira labels are mentioned for downstream execution, are they limited to current Jira-safe metadata labels such as `mode-afk`, `wt-development`, `effort-medium`, and the local checkout routing label rather than workflow/status, type, parent/child, or model labels?
+- If Jira model routing is included, does the PRD distinguish the OpenAI backend family from the Anthropic Claude Opus frontend family and record the approved native Jira component/effort policy?
 
 ## Troubleshooting
 
